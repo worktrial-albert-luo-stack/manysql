@@ -1,0 +1,137 @@
+"""Sandboxed loader for a dialect's `overrides.py`.
+
+Why sandbox? Generated overrides come either from an LLM (untrusted) or a
+human author (trusted, but still nice to fail loudly on accidents). The
+loader:
+
+  - Restricts `__import__` to a small allowlist (polars, pyarrow, math,
+    typing, etc.). Any other import raises `OverrideImportError` at load
+    time.
+  - Strips dangerous builtins (`open`, `eval`, `exec`, `compile`, `__import__`).
+  - Compiles the source with the supplied filename so tracebacks are
+    readable.
+
+The loader returns a plain `ModuleType` whose `FUNCTIONS` / `OPERATORS`
+dicts the executor can consult.
+
+This sandbox is intentionally conservative: it stops accidents and
+trivial misuse. It does not defend against a determined adversary inside
+the same Python process. For training / dataset curation it is enough;
+for production use, run inside a separate subprocess with OS-level
+isolation.
+"""
+
+from __future__ import annotations
+
+import sys
+from importlib.util import module_from_spec, spec_from_loader
+from types import ModuleType
+from typing import Optional
+
+
+_ALLOWED_IMPORTS: frozenset[str] = frozenset(
+    {
+        "__future__",
+        "polars",
+        "pyarrow",
+        "math",
+        "datetime",
+        "decimal",
+        "fractions",
+        "statistics",
+        "typing",
+        "collections",
+        "collections.abc",
+        "functools",
+        "itertools",
+        "re",
+        "json",
+        "operator",
+        "manysql.spec.semantics",
+    }
+)
+
+
+class OverrideImportError(RuntimeError):
+    """Raised when an override module attempts a disallowed import."""
+
+
+def load_overrides(
+    source: str,
+    *,
+    fullname: str = "_codegen_overrides",
+    extra_allowed: Optional[frozenset[str]] = None,
+) -> ModuleType:
+    """Compile and execute `source` with a restricted import allowlist.
+
+    The returned module is registered in `sys.modules[fullname]` so that
+    type-annotation and dataclass machinery can find it; callers should
+    prefer unique fullnames (typically `f"manysql._loaded.{dialect}.overrides"`)
+    to avoid collisions across dialects.
+    """
+    allowed = _ALLOWED_IMPORTS | (extra_allowed or frozenset())
+
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__  # type: ignore[index]
+
+    def _restricted_import(name, globals=None, locals=None, fromlist=(), level=0):  # noqa: A002, ARG001
+        root = name.split(".")[0]
+        if name in allowed or root in allowed or _is_subpath_allowed(name, allowed):
+            return real_import(name, globals, locals, fromlist, level)
+        raise OverrideImportError(
+            f"override module attempted disallowed import: {name!r}"
+        )
+
+    safe_builtins = {
+        k: v
+        for k, v in (
+            __builtins__.items() if isinstance(__builtins__, dict) else vars(__builtins__).items()
+        )
+        if k not in _BLOCKED_BUILTINS
+    }
+    safe_builtins["__import__"] = _restricted_import
+
+    class _Loader:
+        def create_module(self, spec):  # noqa: ARG002
+            return None
+
+        def exec_module(self, module):  # noqa: D401
+            module.__dict__["__builtins__"] = safe_builtins
+            exec(compile(source, fullname, "exec"), module.__dict__)
+
+    spec = spec_from_loader(fullname, _Loader())
+    if spec is None:
+        raise OverrideImportError(f"could not build module spec for {fullname}")
+    module = module_from_spec(spec)
+    sys.modules[fullname] = module
+    try:
+        spec.loader.exec_module(module)  # type: ignore[union-attr]
+    except Exception:
+        sys.modules.pop(fullname, None)
+        raise
+    return module
+
+
+def _is_subpath_allowed(name: str, allowed: frozenset[str]) -> bool:
+    parts = name.split(".")
+    for i in range(1, len(parts) + 1):
+        if ".".join(parts[:i]) in allowed:
+            return True
+    return False
+
+
+_BLOCKED_BUILTINS: frozenset[str] = frozenset(
+    {
+        "open",
+        "eval",
+        "exec",
+        "compile",
+        "input",
+        "exit",
+        "quit",
+        "breakpoint",
+        "help",
+    }
+)
+
+
+__all__ = ["OverrideImportError", "load_overrides"]

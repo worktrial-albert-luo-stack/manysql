@@ -1,0 +1,11 @@
+"""Polars/PyArrow IR executor.
+
+Entry points:
+    PlanExecutor(catalog, semantics).execute(plan) -> pl.DataFrame
+    execute(plan, semantics, catalog) -> pl.DataFrame
+"""
+
+from manysql.executor.engine import PlanExecutor, execute
+from manysql.executor.expr_eval import ExprEvaluator
+
+__all__ = ["PlanExecutor", "execute", "ExprEvaluator"]

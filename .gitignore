@@ -1,0 +1,54 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+build/
+dist/
+.python-version
+
+# uv
+uv.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated artifacts (debugging only; tracked dialects live under manysql/dialects/)
+/scratch/
+/tmp/
+*.tmp
+
+# Registry Tier 2 metadata DB and per-dialect blobs
+manysql/dialects/_registry.db
+manysql/dialects/_registry.db-journal
+
+# Datasets (regenerated from seed)
+manysql/storage/data/*.parquet
+
+# Eval harness output (regenerated per run)
+results/
+eval/results/

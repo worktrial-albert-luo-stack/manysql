@@ -1,0 +1,31 @@
+{
+  "name": "_reference",
+  "description": "Hand-written reference dialect: near-ANSI SQL surface lowered to manysql IR. Used as the codegen template baseline and as the cross-dialect oracle anchor.",
+  "divergence_level": "none",
+  "surface_features": [
+    "select_distinct",
+    "where",
+    "group_by",
+    "having",
+    "order_by_nulls_first_last",
+    "limit_offset",
+    "inner_left_right_full_cross_join",
+    "join_using",
+    "set_ops_union_intersect_except_all",
+    "ctes",
+    "recursive_ctes",
+    "subqueries_uncorrelated",
+    "case_when",
+    "cast_as",
+    "between",
+    "in_list",
+    "in_subquery",
+    "exists",
+    "is_null",
+    "is_distinct_from",
+    "like_ilike",
+    "windows_basic"
+  ],
+  "semantic_overrides": {},
+  "notes": "Surface intentionally close to DuckDB / ANSI SQL so the multi-oracle harness can verify the same plan against three independent engines."
+}

@@ -1,0 +1,9 @@
+I want to make a system that can generate new sql dialects, with the end goal of training llm's to learn many unique dialects so they can generalize better.
+a dialect is comprised of at least a grammar and execution logic, and ideally, we generate all components (including compiler/executor) so we can train the llm in a fully faithful simulation environment
+help me plan out the system. 
+
+some random ideas/constraints:
+- use llm's to generate the grammar
+- for the execution engine, maybe we can try to use existing tools like sqlglot / sqlparser and use a coding agent to modify them for each individual dialect
+- or maybe make all synthetic dialects transpilable to sqllite so the execution is abstracted away, unclear what the best way to go about this is
+- we want generated dialects to be meaningfully different from each other, but also adherent to core sql programming principles/standards (ansi/iso)

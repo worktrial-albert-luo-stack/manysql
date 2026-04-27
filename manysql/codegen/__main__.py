@@ -438,6 +438,13 @@ class RichCampaignReporter(CampaignReporter):
             f"package_failed={len(result.failed_packages)}"
         )
 
+    def on_interrupted(self, *, stage: str) -> None:
+        self._console.print(
+            f"[yellow]interrupted[/yellow] during {stage}; finalizing "
+            "partial manifest. Already-running LLM HTTP calls will keep "
+            "running until they finish or hit their timeout."
+        )
+
 
 def _truncate(s: str, limit: int) -> str:
     s = s.strip()
@@ -550,15 +557,28 @@ def _run_batch(args: argparse.Namespace, console: Console) -> int:
 
     llm = _build_llm_client(args.model)
     reporter = RichCampaignReporter(console)
+    interrupted = False
     try:
-        result = run_campaign(
-            config, llm=llm, dialects_root=root, reporter=reporter
-        )
+        try:
+            result = run_campaign(
+                config, llm=llm, dialects_root=root, reporter=reporter
+            )
+        except KeyboardInterrupt:
+            interrupted = True
+            # run_campaign re-raises after writing a partial manifest;
+            # the manifest path was already announced via the reporter.
+            console.print(
+                "\n[yellow]campaign interrupted by user[/yellow]; "
+                "see the partial manifest above."
+            )
+            return 130
     finally:
         llm.close()
 
     console.print()
     _print_campaign_result(console, result, root)
+    if interrupted:
+        return 130
     if not result.drafted and not result.packaged:
         return 1
     return 0

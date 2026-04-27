@@ -264,6 +264,8 @@ class CampaignReporter:
 
     def on_campaign_done(self, *, result: "CampaignResult") -> None: ...
 
+    def on_interrupted(self, *, stage: str) -> None: ...
+
 
 _NULL_REPORTER = CampaignReporter()
 
@@ -325,6 +327,8 @@ def design_dialect_batch(
     *,
     existing_names: set[str],
     reporter: Optional[CampaignReporter] = None,
+    _drafted_out: Optional[list[tuple[DialectSpec, LedgerEntry]]] = None,
+    _failures_out: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[list[tuple[DialectSpec, LedgerEntry]], list[dict[str, Any]]]:
     """Stage 1: sequentially design ``config.n`` specs.
 
@@ -334,14 +338,23 @@ def design_dialect_batch(
     retried once with the validation error in-prompt; a second failure is
     recorded and the campaign continues. Returned specs always have unique
     names (deduped against existing dialects + the running ledger).
+
+    The private ``_drafted_out`` / ``_failures_out`` parameters let the
+    caller observe partial state on ``KeyboardInterrupt``: when the LLM
+    raises mid-loop, the exception propagates but the lists keep every
+    slot completed before the interrupt.
     """
     rep = reporter or _NULL_REPORTER
     schedule = _compute_theme_schedule(config.theme, config.n)
     rep.on_design_phase_start(schedule=list(schedule))
     schema_text = json.dumps(DialectSpec.model_json_schema(), indent=2)
     examples_text = _few_shot_examples_text()
-    drafted: list[tuple[DialectSpec, LedgerEntry]] = []
-    failures: list[dict[str, Any]] = []
+    drafted: list[tuple[DialectSpec, LedgerEntry]] = (
+        _drafted_out if _drafted_out is not None else []
+    )
+    failures: list[dict[str, Any]] = (
+        _failures_out if _failures_out is not None else []
+    )
     taken_names: set[str] = set(existing_names)
     ledger_so_far: list[LedgerEntry] = []
     total = len(schedule)
@@ -403,25 +416,48 @@ def run_campaign(
 
     rep.on_campaign_start(config=config, model=llm.config.default_model)
 
-    brief = expand_campaign_brief(config, llm, reporter=rep)
-    drafted, failed_specs = design_dialect_batch(
-        brief, config, llm, existing_names=existing, reporter=rep
-    )
+    # Preallocate outputs so design_dialect_batch can mutate them in
+    # place. If the LLM raises mid-design we still keep the slots that
+    # completed before the interrupt.
+    drafted: list[tuple[DialectSpec, LedgerEntry]] = []
+    failed_specs: list[dict[str, Any]] = []
+    packaged: list[PackageWriteResult] = []
+    failed_packages: list[dict[str, Any]] = []
+    interrupted = False
+    brief: Optional[CampaignBrief] = None
 
-    packaged, failed_packages = _fan_out_packages(
-        drafted=drafted,
-        config=config,
-        llm=llm,
-        dialects_root=root,
-        reporter=rep,
-    )
+    try:
+        brief = expand_campaign_brief(config, llm, reporter=rep)
+        design_dialect_batch(
+            brief,
+            config,
+            llm,
+            existing_names=existing,
+            reporter=rep,
+            _drafted_out=drafted,
+            _failures_out=failed_specs,
+        )
+        packaged, failed_packages, interrupted = _fan_out_packages(
+            drafted=drafted,
+            config=config,
+            llm=llm,
+            dialects_root=root,
+            reporter=rep,
+        )
+    except KeyboardInterrupt:
+        # Brief + design phases run on the main thread, so we catch KI
+        # here (not in the helpers) and finalize a partial manifest.
+        # _fan_out_packages swallows its own KI and returns
+        # interrupted=True via the assignment above.
+        interrupted = True
+        rep.on_interrupted(stage="design" if brief is not None else "brief")
 
     finished_at = datetime.now(timezone.utc).isoformat()
     cid = _make_campaign_id(started_at, config)
     result = CampaignResult(
         id=cid,
         config=config,
-        brief=brief,
+        brief=brief or CampaignBrief("", (), (), (), ""),
         drafted=drafted,
         packaged=packaged,
         failed_specs=failed_specs,
@@ -432,6 +468,10 @@ def run_campaign(
     manifest_path = write_campaign_manifest(result, root)
     rep.on_manifest_written(path=manifest_path)
     rep.on_campaign_done(result=result)
+    if interrupted:
+        # Re-raise so the CLI can exit non-zero. The manifest above is
+        # the authoritative record of what survived.
+        raise KeyboardInterrupt
     return result
 
 
@@ -605,20 +645,31 @@ def _fan_out_packages(
     llm: LLMClient,
     dialects_root: Path,
     reporter: CampaignReporter,
-) -> tuple[list[PackageWriteResult], list[dict[str, Any]]]:
-    """Drive ``write_dialect_package`` per drafted spec in parallel."""
+) -> tuple[list[PackageWriteResult], list[dict[str, Any]], bool]:
+    """Drive ``write_dialect_package`` per drafted spec in parallel.
+
+    Returns ``(packaged, failed, interrupted)``. On ``KeyboardInterrupt``
+    we cancel queued futures, mark mid-flight workers as dropped, and
+    return whatever finished cleanly so the caller can still write a
+    manifest. The pool is shut down with ``cancel_futures=True`` and
+    ``wait=False`` -- already-running workers will finish their current
+    HTTP call (up to the LLM client's configured timeout) before the
+    process can exit.
+    """
     packaged: list[PackageWriteResult] = []
     failed: list[dict[str, Any]] = []
     if not drafted:
-        return packaged, failed
+        return packaged, failed, False
     real_llm = not isinstance(llm, NullLLMClient)
     workers = max(1, config.max_concurrency)
     reporter.on_package_phase_start(n=len(drafted), max_concurrency=workers)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        future_to_name: dict[Future[PackageWriteResult], str] = {}
-        # Track per-future submit time so we can report wall-clock
-        # latency per package even when many run concurrently.
-        future_started: dict[Future[PackageWriteResult], float] = {}
+    pool = ThreadPoolExecutor(max_workers=workers)
+    future_to_name: dict[Future[PackageWriteResult], str] = {}
+    # Track per-future submit time so we can report wall-clock latency
+    # per package even when many run concurrently.
+    future_started: dict[Future[PackageWriteResult], float] = {}
+    interrupted = False
+    try:
         for spec, _entry in drafted:
             fut = pool.submit(
                 write_dialect_package,
@@ -634,37 +685,60 @@ def _fan_out_packages(
             )
             future_to_name[fut] = spec.name
             future_started[fut] = time.monotonic()
-        for fut in as_completed(future_to_name):
-            name = future_to_name[fut]
-            elapsed = time.monotonic() - future_started[fut]
-            try:
-                pkg = fut.result()
-            except BatteryError as exc:
-                reason = f"battery: {exc}"
+        try:
+            for fut in as_completed(future_to_name):
+                name = future_to_name[fut]
+                elapsed = time.monotonic() - future_started[fut]
+                try:
+                    pkg = fut.result()
+                except BatteryError as exc:
+                    reason = f"battery: {exc}"
+                    failed.append({"name": name, "reason": reason})
+                    reporter.on_package_failed(
+                        name=name, reason=reason, elapsed_s=elapsed
+                    )
+                except FileExistsError as exc:
+                    reason = f"file_exists: {exc}"
+                    failed.append({"name": name, "reason": reason})
+                    reporter.on_package_failed(
+                        name=name, reason=reason, elapsed_s=elapsed
+                    )
+                except Exception as exc:  # noqa: BLE001 - blanket guard around inner pipeline
+                    reason = f"{type(exc).__name__}: {exc}"
+                    failed.append({"name": name, "reason": reason})
+                    reporter.on_package_failed(
+                        name=name, reason=reason, elapsed_s=elapsed
+                    )
+                else:
+                    packaged.append(pkg)
+                    reporter.on_package_done(
+                        name=name,
+                        summary=_package_summary(pkg),
+                        elapsed_s=elapsed,
+                    )
+        except KeyboardInterrupt:
+            interrupted = True
+            reporter.on_interrupted(stage="package")
+            for f, name in future_to_name.items():
+                if f.done():
+                    continue
+                elapsed = time.monotonic() - future_started[f]
+                cancelled = f.cancel()
+                reason = (
+                    "interrupted: cancelled before start"
+                    if cancelled
+                    else "interrupted: worker mid-flight, dropped"
+                )
                 failed.append({"name": name, "reason": reason})
                 reporter.on_package_failed(
                     name=name, reason=reason, elapsed_s=elapsed
                 )
-            except FileExistsError as exc:
-                reason = f"file_exists: {exc}"
-                failed.append({"name": name, "reason": reason})
-                reporter.on_package_failed(
-                    name=name, reason=reason, elapsed_s=elapsed
-                )
-            except Exception as exc:  # noqa: BLE001 - blanket guard around inner pipeline
-                reason = f"{type(exc).__name__}: {exc}"
-                failed.append({"name": name, "reason": reason})
-                reporter.on_package_failed(
-                    name=name, reason=reason, elapsed_s=elapsed
-                )
-            else:
-                packaged.append(pkg)
-                reporter.on_package_done(
-                    name=name,
-                    summary=_package_summary(pkg),
-                    elapsed_s=elapsed,
-                )
-    return packaged, failed
+    finally:
+        # cancel_futures=True kills queued tasks immediately; wait=False
+        # avoids blocking on in-flight workers (they live until their
+        # current HTTP call returns or the process exits via atexit).
+        pool.shutdown(wait=False, cancel_futures=True)
+    return packaged, failed, interrupted
 
 
 def _package_summary(p: PackageWriteResult) -> dict[str, Any]:

@@ -362,6 +362,9 @@ class _RecordingReporter(CampaignReporter):
     def on_campaign_done(self, **kw: Any) -> None:
         self.events.append(("campaign_done", kw))
 
+    def on_interrupted(self, **kw: Any) -> None:
+        self.events.append(("interrupted", kw))
+
 
 def test_run_campaign_emits_reporter_events(tmp_path: Path) -> None:
     """Happy-path campaign emits the expected event sequence in order.
@@ -439,3 +442,56 @@ def test_run_campaign_emits_failure_events(tmp_path: Path) -> None:
     assert failed[0][1]["target_divergence"] == "mild"
     assert failed[0][1]["reason"]
     assert not [e for e in reporter.events if e[0] == "design_slot_done"]
+
+
+# --- ctrl-c / interrupt handling ---
+
+
+class _InterruptingLLM(_ScriptedLLM):
+    """Raises KeyboardInterrupt on the Nth call to simulate ctrl-c."""
+
+    def __init__(self, replies: list[str], *, raise_on_call: int) -> None:
+        super().__init__(replies)
+        self._raise_on_call = raise_on_call
+        self._calls = 0
+
+    def chat(self, **kwargs: Any) -> LLMResponse:  # type: ignore[override]
+        self._calls += 1
+        if self._calls == self._raise_on_call:
+            raise KeyboardInterrupt
+        return super().chat(**kwargs)
+
+
+def test_run_campaign_interrupt_during_design_writes_partial_manifest(
+    tmp_path: Path,
+) -> None:
+    """Ctrl-C in the design phase still produces a manifest and re-raises.
+
+    Slot 0 succeeds, slot 1's first LLM call raises KeyboardInterrupt;
+    we expect: drafted={alpha}, no packages, manifest on disk, KI surfaces
+    to the caller for non-zero exit.
+    """
+    replies = [
+        _brief_reply(),
+        _design_reply("alpha", divergence="mild"),
+    ]
+    llm = _InterruptingLLM(replies, raise_on_call=3)
+    reporter = _RecordingReporter()
+    cfg = CampaignConfig(n=2, theme="mixed")
+    root = tmp_path / "fresh"
+
+    import pytest
+
+    with pytest.raises(KeyboardInterrupt):
+        run_campaign(cfg, llm=llm, dialects_root=root, reporter=reporter)
+
+    names = [e[0] for e in reporter.events]
+    assert "interrupted" in names
+    assert "manifest_written" in names
+
+    manifest_event = next(e for e in reporter.events if e[0] == "manifest_written")
+    manifest_path = manifest_event[1]["path"]
+    assert manifest_path.is_file()
+    payload = json.loads(manifest_path.read_text())
+    assert {d["spec"]["name"] for d in payload["drafted"]} == {"alpha"}
+    assert payload["packaged"] == []

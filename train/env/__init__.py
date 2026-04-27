@@ -32,10 +32,17 @@ Public surface, in roughly the order callers reach for things:
        example brings its own small Wikipedia table; the catalog packs
        N of them into one snapshot. See :mod:`train.env.wikisql`.
 
+* :class:`BirdCatalog`, :class:`BirdTaskGenerator`,
+  :class:`BirdTaskConfig`, :class:`BirdEntry`, :class:`BirdTableInfo`
+    -- BIRD-SQL prompt / multi-table-database / answer triples as RL
+       tasks. Strictly harder than WikiSQL: real Kaggle-style schemas
+       (5-25 tables per DB) plus an "evidence" field carrying domain
+       semantics. See :mod:`train.env.bird`.
+
 Importing this module loads only stub deps (dataclasses, typing); the
 heavy work (Lark, polars, the dialect package, ``datasets`` for
-WikiSQL) happens when you call ``DialectRuntime.setup()`` or
-``CatalogProvider.build()``.
+WikiSQL/BIRD, stdlib ``sqlite3`` for BIRD database files) happens
+when you call ``DialectRuntime.setup()`` or ``CatalogProvider.build()``.
 """
 
 from __future__ import annotations
@@ -79,6 +86,13 @@ from train.env.trl import (
     tasks_to_dataset,
     trl_agent_system_prompt,
 )
+from train.env.bird import (
+    BirdCatalog,
+    BirdEntry,
+    BirdTableInfo,
+    BirdTaskConfig,
+    BirdTaskGenerator,
+)
 from train.env.types import EpisodeResult, StepResult, TaskMeta, Turn
 from train.env.wikisql import (
     WikiSqlCatalog,
@@ -90,6 +104,11 @@ from train.env.wikisql import (
 __all__ = [
     "REWARD_COMPONENTS",
     "TRL_AGENT_BASE_RULES",
+    "BirdCatalog",
+    "BirdEntry",
+    "BirdTableInfo",
+    "BirdTaskConfig",
+    "BirdTaskGenerator",
     "CatalogProvider",
     "CatalogSnapshot",
     "DialectRuntime",

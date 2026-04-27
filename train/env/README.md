@@ -116,6 +116,7 @@ python -m train.env --dialect aggressive_alien --generator golden --policy gold 
 | `GoldenTaskGenerator` | "Translate this reference SQL: …" | reference dialect runtime on golden 5-table catalog | Teaching the model to *speak* a dialect (mechanical translation, no NL ambiguity). |
 | `EvalSuiteTaskGenerator` | NL question from `eval.dataset.questions` | SQLite running the question's reference SQL on `github_events` | End-to-end NL→SQL benchmarking against a synthetic dialect. |
 | `WikiSqlTaskGenerator` | NL question from `Salesforce/wikisql` + per-task table schema | reference dialect runtime on a `WikiSqlCatalog` of N sampled tables | NL→SQL on real Wikipedia tables with diverse schemas; large-scale variety. |
+| `BirdTaskGenerator` | NL question + evidence + multi-table real-DB schema from `birdsql/bird23-train-filtered` (or `bird_sql_dev_20251106`) | stdlib `sqlite3` running the gold SQL against the source `.sqlite` file | NL→SQL on real Kaggle-style multi-table schemas. Strictly harder than WikiSQL (joins, subqueries, CTEs, evidence-style domain hints). Use when WikiSQL ceilings out for your model size. |
 
 All subclass `TaskGenerator(ABC)`; rolling your own (e.g. for a Spider-style
 multi-table benchmark or a synthesized augmentation pipeline) means
@@ -155,6 +156,93 @@ gen = WikiSqlTaskGenerator(
 gen.build()
 tasks = gen.all_tasks()  # list[SqlTask]
 ```
+
+### BIRD-SQL specifics
+
+BIRD-SQL is the multi-table, real-schema, evidence-augmented step up
+from WikiSQL. Use it when GRPO ceilings out on WikiSQL (typical for
+Qwen3-4B-Instruct and larger): WikiSQL's `agg(col) WHERE col op val`
+shape collapses to one of ~20 templates the model masters quickly,
+whereas BIRD's joins / CTEs / domain-evidence reasoning keep yielding
+training signal much longer.
+
+`BirdCatalog` pulls a reproducible random subset of N examples from
+the BIRD HF dataset (`birdsql/bird23-train-filtered` for train,
+`birdsql/bird_sql_dev_20251106` for dev), walks the union of
+referenced `db_id` values, and loads each one's tables out of the
+matching `.sqlite` file via stdlib `sqlite3`. Tables are namespaced
+`<db_id>__<table>` so the global catalog stays unique; column names
+are sanitized to `c_<lowercase_alnum>` (with dedup suffixes on
+collision) so they parse in every dialect's grammar.
+
+Gold rows come from running the original BIRD `SQL` field through
+stdlib `sqlite3` against the source `.sqlite` file -- column-name
+comparison is column-name-insensitive, so we never need to rewrite
+the gold SQL to use sanitized identifiers (which would mean parsing
+SQLite-specific functions like `STRFTIME` / `IIF` / `JULIANDAY`).
+
+**Database files do NOT ship through HuggingFace.** The train DB pack
+is a ~5GB zip on a public Beijing OSS bucket; we auto-download it
+into `~/.cache/manysql/bird/train/` on first use (override with
+`--bird-db-dir` or `$BIRD_DB_DIR`). The dev DB pack is on Google
+Drive; we fail fast with the GDrive URL in the error message if the
+files aren't present locally.
+
+#### Memory & disk safety
+
+BIRD's 95 databases total 33.4 GB on disk and contain a long tail of
+multi-GB outliers (`donor` is 4.5 GB by itself, with single tables in
+the tens of millions of rows). Loading those into Polars OOMs a
+32 GB box, and unzipping them all is ~30 GB of disk. Two knobs cap
+both:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--bird-max-db-bytes BYTES` | 500 MB | Skip any source `.sqlite` larger than this. Applied at zip-extraction time (the file never lands on disk) **and** at catalog-build time. Set to 0 to disable. |
+| `--bird-max-rows-per-table N` | 200,000 | Cap each table at N rows. Realized as a per-DB sampled SQLite mirror under `~/.cache/manysql/bird/_sampled_r<N>/<split>/<db_id>/`; both Polars catalog loading and gold-SQL execution use the mirror, so the model and the gold answer agree on the input rowset. Set to 0 to disable. |
+
+The auto-download path is also selective: it only extracts files
+under `train/train_databases/<db_id>/...` for the db_ids referenced
+by the sampled questions, then deletes `train.zip` to reclaim ~5 GB
+(set `BIRD_KEEP_ZIP=1` to retain the zip if you're iterating on the
+sample size and don't want to re-download).
+
+Caveat for `--bird-max-rows-per-table`: sampling is deterministic
+(`ORDER BY ROWID LIMIT N`) but per-table independent, so a
+foreign-key column on a sampled child table may point at a parent
+row that fell outside the cap, producing empty joins. Tasks with
+empty gold result sets are filtered out by `BirdTaskConfig.drop_empty`
+(default True), so this surfaces as fewer training tasks rather
+than wrong rewards.
+
+```python
+from train.env import (
+    DialectRuntime, BirdCatalog, BirdTaskGenerator, BirdTaskConfig,
+)
+
+# Train: auto-downloads ~5GB on first call (selectively extracts
+# only the DBs referenced by the sample), then caps per-table rows
+# at the default 200k.
+cat = BirdCatalog(
+    n_samples=1000,
+    split="train",
+    seed=0,
+    difficulties=("simple", "moderate"),  # 'challenging' is opt-in
+)
+gen = BirdTaskGenerator(
+    BirdTaskConfig(target_dialect="aggressive_alien", catalog=cat)
+)
+gen.build()
+tasks = gen.all_tasks()  # list[SqlTask]
+```
+
+Each task's user prompt embeds the question, the evidence field
+(BIRD's domain hints), and a per-DB schema block listing every table
+in that DB with sanitized + original column headers, types, and a
+few sample rows. The system-prompt schema slot stays a thin
+placeholder pointing at the user message (the same pattern WikiSQL
+uses) -- jamming all 70+ DBs into the system prompt would blow
+context for no benefit.
 
 ## Multi-dialect curricula
 

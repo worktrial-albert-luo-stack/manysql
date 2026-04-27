@@ -53,11 +53,10 @@ WikiSQL entries).
 from __future__ import annotations
 
 import random
-import re
-import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
+from train.env._ident import dedupe_columns, safe_ident, safe_table_name
 from train.env.catalog import CatalogProvider, CatalogSnapshot
 from train.env.engine import DialectRuntime
 from train.env.tasks import SqlTask, TaskGenerator
@@ -71,52 +70,24 @@ _WIKISQL_COND_OPS: tuple[str, ...] = ("=", ">", "<")
 
 
 # ---------------------------------------------------------------------------
-# Sanitization helpers
+# Backwards-compat aliases for the helpers we moved to :mod:`train.env._ident`
 # ---------------------------------------------------------------------------
+# External callers (and test modules) have been importing these as private
+# helpers from this module since before the BIRD refactor extracted them.
+# Keep the old names so the import surface stays stable; the actual code
+# lives in ``_ident.py`` so :mod:`train.env.bird` can share it.
 
 
 def _safe_ident(raw: str, *, fallback: str = "x") -> str:
-    """Map an arbitrary string to a safe SQL identifier.
-
-    Strips diacritics, replaces non-alphanumeric runs with underscores,
-    lowercases, and prepends ``c_`` so reserved-word collisions are
-    avoided regardless of dialect. Empty results fall back to
-    ``c_<fallback>`` (e.g. when the original heading was a single
-    non-ASCII glyph that gets stripped entirely).
-    """
-    norm = unicodedata.normalize("NFKD", raw or "")
-    norm = norm.encode("ascii", "ignore").decode("ascii")
-    norm = re.sub(r"[^a-zA-Z0-9]+", "_", norm).strip("_").lower()
-    if not norm:
-        norm = fallback
-    return f"c_{norm}"
+    return safe_ident(raw, fallback=fallback)
 
 
 def _safe_table_name(raw: str) -> str:
-    norm = re.sub(r"[^a-zA-Z0-9]+", "_", raw or "").strip("_").lower()
-    if not norm:
-        norm = "anon"
-    return f"wikisql_{norm}"
+    return safe_table_name(raw, prefix="wikisql_", fallback="anon")
 
 
 def _dedupe_columns(names: list[str]) -> list[str]:
-    """Resolve duplicate sanitized column names by suffixing _1, _2, ...
-
-    WikiSQL occasionally has tables with two columns whose original
-    headers collapse to the same sanitized form (e.g. "Score (1)" and
-    "Score (2)" both become ``c_score``). Deduping keeps the first
-    occurrence and suffixes the rest so the IR schema stays unique.
-    """
-    seen: dict[str, int] = {}
-    out: list[str] = []
-    for name in names:
-        if name not in seen:
-            seen[name] = 0
-            out.append(name)
-        else:
-            seen[name] += 1
-            out.append(f"{name}_{seen[name]}")
-    return out
+    return dedupe_columns(names)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +197,7 @@ class WikiSqlCatalog(CatalogProvider):
             table = row["table"]
             sql = row["sql"]
             raw_id = table.get("id") or f"i{idx}"
-            base_name = _safe_table_name(raw_id)
+            base_name = safe_table_name(raw_id, prefix="wikisql_")
             # Different examples can share a table id (e.g. multiple
             # questions over the same Wikipedia table). Suffix on
             # collision so each task gets a uniquely named table.
@@ -298,8 +269,8 @@ class WikiSqlCatalog(CatalogProvider):
         rows = table["rows"]
         if not header:
             return None, []
-        safe_header = _dedupe_columns(
-            [_safe_ident(h, fallback=f"col{i}") for i, h in enumerate(header)]
+        safe_header = dedupe_columns(
+            [safe_ident(h, fallback=f"col{i}") for i, h in enumerate(header)]
         )
 
         cols: dict[str, list[Any]] = {n: [] for n in safe_header}

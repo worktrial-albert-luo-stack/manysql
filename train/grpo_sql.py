@@ -22,6 +22,16 @@ Task sources (``--generator``)
   human-readable strings; gold rows are computed by running that SQL
   through the reference dialect engine.
 
+* ``bird`` -- :class:`BirdTaskGenerator`: pulls ``--bird-size``
+  examples from the BIRD-SQL HF dataset (``birdsql/
+  bird23-train-filtered`` for train, ``birdsql/bird_sql_dev_20251106``
+  for dev). Each example references a multi-table real-world database
+  with an "evidence" field carrying domain semantics. Strictly harder
+  than WikiSQL: GRPO on Qwen3-4B-Instruct ceilings out on WikiSQL
+  fast, but BIRD's simple+moderate slice keeps yielding signal. Auto-
+  downloads the train DB pack (~5GB) on first use; for dev the user
+  must download from Google Drive manually (URL in the error message).
+
 Multi-dialect curricula (``--dialects`` / ``--coverage-mode``)
 --------------------------------------------------------------
 
@@ -160,6 +170,18 @@ class TrainArgs:
     wikisql_split: str = "train"
     wikisql_seed: int = 0
     wikisql_sample_rows: int = 3
+    # BIRD-SQL knobs (only used with --generator bird)
+    bird_size: int = 1000
+    bird_split: str = "train"  # 'train' | 'dev'
+    bird_seed: int = 0
+    bird_sample_rows: int = 3
+    bird_difficulty: str = "simple,moderate"
+    bird_db_dir: str | None = None
+    bird_no_download: bool = False
+    # Memory / disk safety. Defaults match BirdTaskConfig defaults
+    # (500 MB / 200k rows). Set to 0 from the CLI to disable either.
+    bird_max_db_bytes: int = 500 * 1024 * 1024
+    bird_max_rows_per_table: int = 200_000
     # ---- rewards ----
     reward_mode: str = "discounted"  # 'linear' | 'discounted'
     discount_factor: float = 0.9
@@ -218,12 +240,15 @@ def parse_args() -> TrainArgs:
     p.add_argument(
         "--generator",
         default=defaults.generator,
-        choices=["golden", "eval_suite", "wikisql"],
+        choices=["golden", "eval_suite", "wikisql", "bird"],
         help=(
             "Task source. golden = cross-dialect translation on the 5-table "
             "manysql catalog; eval_suite = NL->SQL benchmark questions on "
             "github_events; wikisql = NL->SQL on Wikipedia tables from "
-            "Salesforce/wikisql (use --wikisql-size to pick a subset)."
+            "Salesforce/wikisql; bird = NL->SQL on multi-table real-world "
+            "databases from BIRD-SQL (strictly harder than wikisql; "
+            "downloads ~5GB of SQLite DBs on first run). Use --bird-size "
+            "to pick a subset."
         ),
     )
     p.add_argument(
@@ -255,6 +280,88 @@ def parse_args() -> TrainArgs:
         type=int,
         default=defaults.wikisql_sample_rows,
         help="How many sample rows to embed in each WikiSQL user prompt.",
+    )
+    p.add_argument(
+        "--bird-size",
+        type=int,
+        default=defaults.bird_size,
+        help="Number of BIRD examples to sample (only used with --generator=bird).",
+    )
+    p.add_argument(
+        "--bird-split",
+        default=defaults.bird_split,
+        choices=["train", "dev"],
+        help=(
+            "BIRD-SQL split. 'train' uses the curated bird23-train-filtered "
+            "(6,601 quality-checked rows; auto-downloads train.zip on first "
+            "use). 'dev' uses bird_sql_dev_20251106 (1,534 rows; requires "
+            "manual GDrive download)."
+        ),
+    )
+    p.add_argument(
+        "--bird-seed",
+        type=int,
+        default=defaults.bird_seed,
+        help="Seed for the BIRD random subset selection.",
+    )
+    p.add_argument(
+        "--bird-sample-rows",
+        type=int,
+        default=defaults.bird_sample_rows,
+        help="How many sample rows to embed in each BIRD user prompt per table.",
+    )
+    p.add_argument(
+        "--bird-difficulty",
+        default=defaults.bird_difficulty,
+        help=(
+            "Comma-separated BIRD difficulty levels to include "
+            "(simple, moderate, challenging). Default: 'simple,moderate' "
+            "-- 'challenging' often needs SQL features the synthetic "
+            "dialects don't expose, so it's opt-in."
+        ),
+    )
+    p.add_argument(
+        "--bird-db-dir",
+        default=defaults.bird_db_dir,
+        help=(
+            "Path to a directory containing BIRD <db_id>/<db_id>.sqlite "
+            "files. Overrides the auto-download cache. Useful if you've "
+            "already extracted the BIRD pack elsewhere or are pointing at "
+            "the dev split (which can't be auto-downloaded)."
+        ),
+    )
+    p.add_argument(
+        "--bird-no-download",
+        action="store_true",
+        help=(
+            "Disable BIRD train auto-download. Combined with --bird-db-dir, "
+            "this lets a CI / sandboxed run fail loudly instead of trying "
+            "to fetch ~5GB."
+        ),
+    )
+    p.add_argument(
+        "--bird-max-db-bytes",
+        type=int,
+        default=defaults.bird_max_db_bytes,
+        help=(
+            "Skip any BIRD .sqlite larger than this many bytes. "
+            "Applied at zip-extract time (huge DBs never touch disk) "
+            "and at catalog-build time. Default 500 MB excludes the "
+            "long-tail outliers (donor=4.5GB, synthea, etc.); set to "
+            "0 to disable the filter."
+        ),
+    )
+    p.add_argument(
+        "--bird-max-rows-per-table",
+        type=int,
+        default=defaults.bird_max_rows_per_table,
+        help=(
+            "Cap each BIRD table to this many rows when materializing "
+            "into Polars. The cap is realized via a per-DB sampled "
+            "SQLite mirror so gold-SQL execution and the model see "
+            "the same rowset. Default 200,000 keeps memory bounded "
+            "on a 32GB box; set to 0 to disable (load full tables)."
+        ),
     )
     p.add_argument(
         "--reward-mode",
@@ -364,6 +471,29 @@ def build_runtimes_and_tasks(
                 split=args.wikisql_split,
                 seed=args.wikisql_seed,
                 sample_rows=args.wikisql_sample_rows,
+            )
+        )
+    elif args.generator == "bird":
+        from train.env.bird import (  # noqa: PLC0415
+            BirdTaskConfig,
+            BirdTaskGenerator,
+        )
+
+        difficulties = tuple(
+            d.strip() for d in args.bird_difficulty.split(",") if d.strip()
+        )
+        gen = BirdTaskGenerator(
+            BirdTaskConfig(
+                target_dialect=base_dialect,
+                n_samples=args.bird_size,
+                split=args.bird_split,
+                seed=args.bird_seed,
+                sample_rows=args.bird_sample_rows,
+                difficulties=difficulties,
+                db_dir=args.bird_db_dir,
+                auto_download=not args.bird_no_download,
+                max_db_bytes=args.bird_max_db_bytes,
+                max_rows_per_table=args.bird_max_rows_per_table,
             )
         )
     else:  # pragma: no cover - argparse choices guard this
@@ -578,7 +708,20 @@ def _dry_run(args: TrainArgs) -> None:
         row.append(f"{total:+.3f}")
         print("  " + "  ".join(f"{c:>26}" for c in row))
 
-    if args.reward_mode == "discounted" and all_scores:
+    # Sanity check: for generators where ``gold_sql`` is dialect-runnable
+    # (golden / wikisql / eval_suite), the fake "perfect" completion that
+    # echoes ``gold_sql`` should score correctness=1.0 in discounted mode.
+    # BIRD is the exception: its ``gold_sql`` is the original BIRD SQL
+    # against original (un-sanitized, backtick-quoted) identifiers so
+    # stdlib sqlite3 can run it for ground truth, while the model writes
+    # against the catalog's sanitized identifiers. The dry-run still
+    # exercises the full pipeline end-to-end; it just doesn't have a
+    # trivial "echo gold_sql" reference completion to anchor on.
+    if (
+        args.reward_mode == "discounted"
+        and all_scores
+        and args.generator != "bird"
+    ):
         correctness_scores = next(
             scores for scores, fn in zip(all_scores, funcs, strict=False)
             if fn.__name__ == "sql_correctness_reward"

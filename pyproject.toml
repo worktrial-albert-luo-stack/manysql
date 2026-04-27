@@ -28,6 +28,8 @@ dev = [
 manysql-eval = "eval.__main__:main"
 # Convenience alias so `uv run eval --dry-run` works.
 eval = "eval.__main__:main"
+# Serve a LoRA adapter on top of a base model in vLLM and run evals against it.
+manysql-serve-eval = "eval.serve_lora:main"
 # Generate a manysql dialect package from a DialectSpec.
 manysql-codegen = "manysql.codegen.__main__:main"
 # Inspect already-generated dialect packages (e.g. battery diffs).

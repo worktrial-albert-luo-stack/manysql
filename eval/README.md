@@ -154,6 +154,51 @@ uv run manysql-codegen gen aggressive_alien --use-llm --overwrite
 This needs `OPENAI_API_KEY` or `OPENROUTER_API_KEY` (configurable via
 `OPENAI_MODEL` / `OPENROUTER_MODEL`).
 
+## Serving a trained LoRA adapter
+
+After `train/grpo_sql.py` writes a LoRA checkpoint to e.g.
+`outputs/grpo_qwen3_4b_sql/lora/`, evaluating it usually means running
+several configs (different dialects, different question subsets,
+different backends) against the same checkpoint. Spinning up vLLM
+costs ~30-60s on H100 so doing one server start per `python -m eval`
+invocation is wasteful.
+
+`eval/serve_lora.py` (alias `manysql-serve-eval`) wraps the lifecycle:
+it spawns `vllm serve <base> --enable-lora --lora-modules <name>=<path>`,
+waits for `/v1/models` to come up, runs each requested eval config
+against `http://localhost:<port>/v1` with `--provider vllm --model <name>`,
+then tears the server down.
+
+```bash
+# one eval per dialect, 20 questions each, 4 threads
+uv run manysql-serve-eval \
+    --lora-path outputs/grpo_qwen3_4b_sql/lora \
+    --dialects aggressive_alien,mild_postgres_ish,tsql_ish \
+    --limit 20 --concurrency 4
+
+# heterogeneous runs from a JSON config
+cat > my_runs.json <<'EOF'
+[
+  {"backend": "sqlite", "limit": 50, "concurrency": 4},
+  {"backend": "synthetic", "synthetic_dialect": "aggressive_alien",
+   "questions": "q01_count_stars,q05_top_repos_by_year_since_2015"}
+]
+EOF
+uv run manysql-serve-eval --lora-path outputs/.../lora --runs my_runs.json
+
+# reuse a vllm server you started yourself in a tmux pane
+uv run manysql-serve-eval --no-server --lora-name my-lora \
+    --backend sqlite --limit 50
+
+# trailing args after `--` forward to every eval invocation
+uv run manysql-serve-eval --lora-path ... --dialects a,b -- \
+    --temperature 0.2 --max-tokens 4096
+```
+
+`--keep-server` leaves vLLM running after all evals finish (handy for
+ad-hoc curl probes); otherwise the server is SIGTERM'd on exit
+(KeyboardInterrupt, eval failure, or successful completion).
+
 ## Roadmap
 
 * Persist results in a structured table (DuckDB?) and add a Rich-rendered

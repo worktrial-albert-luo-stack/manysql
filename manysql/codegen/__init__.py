@@ -21,6 +21,20 @@ dialect. This lets us:
 - diff LLM output against the deterministic baseline.
 """
 
+from manysql.codegen.batch import (
+    CAMPAIGNS_DIRNAME,
+    CampaignBrief,
+    CampaignConfig,
+    CampaignReporter,
+    CampaignResult,
+    LedgerEntry,
+    THEME_CHOICES,
+    ThemeLiteral,
+    design_dialect_batch,
+    expand_campaign_brief,
+    run_campaign,
+    write_campaign_manifest,
+)
 from manysql.codegen.battery_emit import emit_battery_json, emit_examples_sql
 from manysql.codegen.config_emit import emit_semantic_config
 from manysql.codegen.effects_emit import emit_effects
@@ -69,21 +83,30 @@ from manysql.codegen.pipeline import (
 __all__ = [
     "BatteryFailure",
     "BatteryItem",
+    "CAMPAIGNS_DIRNAME",
+    "CampaignBrief",
+    "CampaignConfig",
+    "CampaignReporter",
+    "CampaignResult",
     "GrammarAgentResult",
     "GrammarAttempt",
     "IRBatteryItem",
     "IRDivergence",
     "IREquivalenceReport",
+    "LedgerEntry",
     "LoweringAgentResult",
     "LoweringAttempt",
     "OverrideImportError",
     "PackageBundle",
     "PackageWriteResult",
+    "THEME_CHOICES",
+    "ThemeLiteral",
     "ValidationReport",
     "apply_surface",
     "build_ir_battery",
     "build_package_bundle",
     "build_parse_battery",
+    "design_dialect_batch",
     "emit_battery_json",
     "emit_effects",
     "emit_examples_sql",
@@ -94,11 +117,14 @@ __all__ = [
     "emit_passes",
     "emit_semantic_config",
     "emit_spec_json",
+    "expand_campaign_brief",
     "generate_grammar",
     "generate_lowering",
     "load_overrides",
     "load_sandboxed_module",
+    "run_campaign",
     "validate_grammar",
     "validate_lowering",
+    "write_campaign_manifest",
     "write_dialect_package",
 ]

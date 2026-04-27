@@ -103,7 +103,7 @@ def emit_examples_sql(
         f"-- manysql-codegen examples for dialect: {spec.name}\n"
         "-- Hand-curated canonical SQL queries rewritten into this dialect's surface.\n"
         "-- These are the same items used by the parse and IR-equivalence batteries.\n"
-        f"-- Re-generate with: manysql-codegen {spec.name} --overwrite\n"
+        f"-- Re-generate with: manysql-codegen gen {spec.name} --overwrite\n"
         "\n"
     )
     sections = [f"-- {item.label}\n{item.source}\n" for item in parse_items]

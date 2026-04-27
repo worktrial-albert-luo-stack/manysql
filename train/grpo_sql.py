@@ -1,50 +1,88 @@
-"""GRPO fine-tune of an LLM on a manysql synthetic SQL dialect.
+"""GRPO fine-tune of an LLM on one or more manysql synthetic SQL dialects.
 
 The SQL counterpart to ``train/grpo_gsm8k.py``. Same Unsloth + TRL +
 vLLM stack, same single-file shape, but the dataset, system prompt,
-tool, and reward functions all come from :mod:`train.env`. Specifically:
+tool, and reward functions all come from :mod:`train.env`.
 
-* **Dataset**: ``GoldenTaskGenerator`` (default) or
-  ``EvalSuiteTaskGenerator`` produce :class:`SqlTask`s, which
-  :func:`train.env.trl.tasks_to_dataset` formats into the chat-message
-  shape ``GRPOTrainer`` consumes (one row = one task; ``num_generations``
-  rollouts per row are scored group-relative).
+Task sources (``--generator``)
+------------------------------
 
-* **Tool**: :func:`train.env.trl.make_run_sql_tool` exposes a typed
-  ``run_sql(sql_command)`` to the model. TRL handles the multi-turn
-  loop (assistant tool_call -> tool result -> next assistant turn)
-  natively; we do NOT call ``SqlEnv`` during training. The env stays
-  useful for offline eval, smoke tests, and transcript replay.
+* ``golden`` (default) -- :class:`GoldenTaskGenerator`: cross-dialect
+  translations of the manysql golden corpus on the canonical 5-table
+  catalog. Best signal for teaching a model to *speak* a dialect.
 
-* **System prompt**: ``trl_agent_system_prompt(runtime)`` -- same
-  dialect card + schema, but the rules tell the model to use ``run_sql``
-  rather than emit raw SQL in chat.
+* ``eval_suite`` -- :class:`EvalSuiteTaskGenerator`: NL->SQL benchmark
+  questions over the synthetic ``github_events`` corpus.
 
-* **Rewards**: :func:`train.env.trl.make_reward_funcs` returns one
-  TRL ``reward_func`` per :class:`RewardBreakdown` field
-  (``correctness``, ``turn_bonus``, ``error_shaping``,
-  ``format_penalty``, ``terminal_penalty``). Each shows up as its own
-  panel in W&B / trackio so you can watch the breakdown in flight.
+* ``wikisql`` -- :class:`WikiSqlTaskGenerator`: pulls
+  ``--wikisql-size`` examples from the ``Salesforce/wikisql`` HF
+  dataset (each row carries its own small Wikipedia table). Column
+  names are sanitized to ``c_<name>``; gold SQL is rebuilt from the
+  WikiSQL structured triple to dodge the corpus's inconsistent
+  human-readable strings; gold rows are computed by running that SQL
+  through the reference dialect engine.
+
+Multi-dialect curricula (``--dialects`` / ``--coverage-mode``)
+--------------------------------------------------------------
+
+Pass ``--dialects aggressive_alien,mild_postgres_ish,tsql_ish`` to
+train one model on three dialects at once. Coverage modes:
+
+* ``partition`` (default) -- round-robin assign each task to one
+  dialect (N rows total). Best when N is large and you want per-row
+  diversity rather than per-question dialect coverage.
+
+* ``cross_product`` -- emit each task once per dialect (N samples * M
+  dialects rows). Best when N is small and you want maximum dialect
+  exposure per question.
+
+Multi-dialect dispatch is implemented at the **tool** layer: the
+``run_sql`` tool gains a ``dialect`` argument and the system prompt
+tags every row with ``Dialect: <name>`` and tells the model to copy
+that string verbatim into the call. Reward functions look up each
+row's runtime via the dataset's ``dialect`` column and re-execute
+against ground truth (so a model that misuses the dialect arg still
+gets the correct reward signal). See ``train/env/trl.py`` for the
+adapter mechanics.
+
+Informative priors
+------------------
+
+Each dialect's system prompt includes the **dialect card** rendered by
+``manysql.dialects.card.render_dialect_card``: surface divergences,
+canonical patterns, function aliases, semantic divergences, and a
+trimmed view of the codegen-emitted ``examples.sql``. This is exactly
+what eval uses, by design -- the goal is to give the model the same
+shape of context it would have facing a closed-source dialect (no full
+grammar dump, just the divergences and a Rosetta stone of working
+queries).
 
 Usage
 -----
 
-GPU box (real training)::
+GPU box (real training, single dialect, golden corpus)::
 
     uv venv .venv-train --python 3.11
     source .venv-train/bin/activate
     uv pip install --upgrade pip
     uv pip install "unsloth" "vllm" \\
-        "transformers==4.56.2" "datasets>=2.20" "torch>=2.4" "accelerate" "bitsandbytes" \\
-        "wandb" "python-dotenv"
+        "transformers==4.56.2" "datasets>=2.20" "torch>=2.4" \\
+        "accelerate" "bitsandbytes" "wandb" "python-dotenv"
     uv pip install --no-deps "trl==0.22.2"
 
-    python train/grpo_sql.py --dialect aggressive_alien --max-steps 200
+    python train/grpo_sql.py --dialects aggressive_alien --max-steps 200
 
-CPU box (dry-run, no GPU required)::
+GPU box (multi-dialect WikiSQL, partition mode)::
+
+    python train/grpo_sql.py \\
+        --generator wikisql --wikisql-size 2000 \\
+        --dialects aggressive_alien,mild_postgres_ish,tsql_ish \\
+        --coverage-mode partition --max-steps 500
+
+CPU box (dry-run, no GPU)::
 
     uv pip install "transformers" "datasets"
-    python train/grpo_sql.py --dialect aggressive_alien --dry-run
+    python train/grpo_sql.py --dialects aggressive_alien --dry-run
 
 Differences vs ``grpo_gsm8k.py``
 --------------------------------
@@ -53,30 +91,28 @@ Differences vs ``grpo_gsm8k.py``
   model's tool calls through the dialect engine and comparing rows to
   the precomputed gold rows.
 * No ``SOLUTION_START``/``SOLUTION_END`` template; the model speaks
-  through the ``run_sql`` tool, not freeform text. The system prompt
-  reflects that.
-* ``num_generations`` rollouts of the same prompt all share the same
-  dialect runtime (we hold one process-wide). Group-relative advantages
-  are computed within a single environment, as it should be.
-* One dialect per training run for v0; multi-dialect curricula need a
-  thread-local runtime selector that we haven't wired yet (see
-  ``train/env/trl.py`` constraints docstring).
+  through the ``run_sql`` tool, not freeform text.
+* ``num_generations`` rollouts of the same prompt share the same
+  dialect runtime (or the same dispatch dict in multi-dialect mode).
+  Group-relative advantages are computed within a single environment.
 
 W&B / trackio logging
 ---------------------
 
 If ``WANDB_API_KEY`` is found (in env or ``.env``) the run logs to W&B
-under project ``manysql-grpo`` with run name ``<model>-<dialect>-<steps>``.
-Override with ``--wandb-project`` / ``--wandb-run-name`` or disable with
-``--no-wandb``. Each reward-function component (correctness, turn_bonus,
-...) gets its own panel automatically.
+under project ``manysql-grpo`` with run name
+``<model>-<dialects>-<steps>``. Override with ``--wandb-project`` /
+``--wandb-run-name`` or disable with ``--no-wandb``. Each reward-
+function component (correctness, turn_bonus, ...) gets its own panel
+automatically.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 # UNSLOTH_VLLM_STANDBY=1 unlocks ~30% more context length when vLLM and
@@ -114,10 +150,15 @@ class TrainArgs:
     load_in_4bit: bool = True
     gpu_memory_utilization: float = 0.85
     # ---- env / task generator ----
-    dialect: str = "aggressive_alien"
-    generator: str = "golden"  # 'golden' | 'eval_suite'
+    dialects: list[str] = field(default_factory=lambda: ["aggressive_alien"])
+    coverage_mode: str = "partition"  # 'partition' | 'cross_product'
+    generator: str = "golden"  # 'golden' | 'eval_suite' | 'wikisql'
     eval_suite_limit: int | None = None
     eval_suite_names: list[str] | None = None
+    wikisql_size: int = 1000
+    wikisql_split: str = "train"
+    wikisql_seed: int = 0
+    wikisql_sample_rows: int = 3
     # ---- rewards ----
     reward_mode: str = "discounted"  # 'linear' | 'discounted'
     discount_factor: float = 0.9
@@ -153,22 +194,66 @@ def parse_args() -> TrainArgs:
         default=defaults.gpu_memory_utilization,
     )
     p.add_argument(
-        "--dialect",
-        default=defaults.dialect,
-        help="manysql dialect id (must be loadable by DialectRegistry).",
+        "--dialects",
+        default=",".join(defaults.dialects),
+        help=(
+            "Comma-separated list of manysql dialect ids "
+            "(e.g. 'aggressive_alien,mild_postgres_ish'). One name = "
+            "single-dialect run; >1 name = multi-dialect curriculum, "
+            "see --coverage-mode."
+        ),
+    )
+    p.add_argument(
+        "--coverage-mode",
+        default=defaults.coverage_mode,
+        choices=["partition", "cross_product"],
+        help=(
+            "How to combine tasks with multiple dialects. "
+            "partition (default) = round-robin assign one dialect per "
+            "task (N rows); cross_product = each task once per dialect "
+            "(N*M rows)."
+        ),
     )
     p.add_argument(
         "--generator",
         default=defaults.generator,
-        choices=["golden", "eval_suite"],
-        help="Task source. golden = cross-dialect translation; "
-        "eval_suite = NL->SQL benchmark questions.",
+        choices=["golden", "eval_suite", "wikisql"],
+        help=(
+            "Task source. golden = cross-dialect translation on the 5-table "
+            "manysql catalog; eval_suite = NL->SQL benchmark questions on "
+            "github_events; wikisql = NL->SQL on Wikipedia tables from "
+            "Salesforce/wikisql (use --wikisql-size to pick a subset)."
+        ),
     )
     p.add_argument(
         "--eval-suite-limit",
         type=int,
         default=defaults.eval_suite_limit,
         help="Limit eval-suite questions (only used with --generator=eval_suite).",
+    )
+    p.add_argument(
+        "--wikisql-size",
+        type=int,
+        default=defaults.wikisql_size,
+        help="Number of WikiSQL examples to sample (only used with --generator=wikisql).",
+    )
+    p.add_argument(
+        "--wikisql-split",
+        default=defaults.wikisql_split,
+        choices=["train", "validation", "test"],
+        help="WikiSQL HF split to draw from.",
+    )
+    p.add_argument(
+        "--wikisql-seed",
+        type=int,
+        default=defaults.wikisql_seed,
+        help="Seed for the WikiSQL random subset selection.",
+    )
+    p.add_argument(
+        "--wikisql-sample-rows",
+        type=int,
+        default=defaults.wikisql_sample_rows,
+        help="How many sample rows to embed in each WikiSQL user prompt.",
     )
     p.add_argument(
         "--reward-mode",
@@ -202,24 +287,48 @@ def parse_args() -> TrainArgs:
     p.add_argument("--wandb-run-name", default=defaults.wandb_run_name)
     p.add_argument("--no-wandb", action="store_true")
     ns = p.parse_args()
-    return TrainArgs(**vars(ns))
+    parsed = vars(ns)
+    parsed["dialects"] = _split_csv(parsed["dialects"])
+    if not parsed["dialects"]:
+        p.error("--dialects must contain at least one dialect id")
+    return TrainArgs(**parsed)
+
+
+def _split_csv(s: str | list[str]) -> list[str]:
+    if isinstance(s, list):
+        return [item.strip() for item in s if item and item.strip()]
+    return [item.strip() for item in s.split(",") if item.strip()]
 
 
 # ---------------------------------------------------------------------------
 # Env / dataset construction
 # ---------------------------------------------------------------------------
-def build_runtime_and_tasks(
+def build_runtimes_and_tasks(
     args: TrainArgs,
-) -> tuple[DialectRuntime, list[SqlTask]]:
-    """Build the shared ``DialectRuntime`` and pre-materialize the task list.
+) -> tuple[dict[str, DialectRuntime], list[SqlTask]]:
+    """Build the dialect runtimes and the merged task list.
 
-    The runtime is expensive (loads dialect package, builds Lark parser,
-    materializes Polars catalog) and cheap to call. We keep one
-    process-wide and let TRL's tool dispatch + our reward functions both
-    close over it.
+    Returns a ``(runtimes, tasks)`` pair:
 
-    Catalog choice depends on the task generator: ``golden`` uses the
-    canonical 5-table catalog; ``eval_suite`` uses ``github_events``.
+    * ``runtimes`` maps each dialect id from ``args.dialects`` to a
+      *set-up* :class:`DialectRuntime`. All runtimes share the same
+      catalog instance (catalogs are dialect-independent) so memory +
+      load time scale with O(catalog) not O(catalog * dialects).
+
+    * ``tasks`` is the flat task list ready to feed into the dataset
+      builder. In single-dialect mode each task already targets the one
+      dialect; in multi-dialect mode tasks are produced once with a
+      "base" dialect and cloned-with-relabeling per the coverage mode:
+
+        - ``cross_product``: each task is duplicated for every dialect
+          (N tasks * M dialects = N*M rows), with ``task_id`` suffixed
+          ``__<dialect>`` for uniqueness.
+        - ``partition``: tasks are round-robin assigned, one dialect
+          per task (N rows total).
+
+    Gold rows are dialect-independent (data is the same across dialect
+    runtimes) so we compute them once via the task generator and reuse
+    the cached ``SqlTask.gold_rows`` across clones.
     """
     from train.env.engine import DialectRuntime  # noqa: PLC0415
     from train.env.tasks import (  # noqa: PLC0415
@@ -229,38 +338,115 @@ def build_runtime_and_tasks(
         GoldenTaskGenerator,
     )
 
+    base_dialect = args.dialects[0]
+
     if args.generator == "golden":
-        gen = GoldenTaskGenerator(GoldenTaskConfig(target_dialect=args.dialect))
+        gen = GoldenTaskGenerator(GoldenTaskConfig(target_dialect=base_dialect))
     elif args.generator == "eval_suite":
         gen = EvalSuiteTaskGenerator(
             EvalSuiteTaskConfig(
-                target_dialect=args.dialect,
+                target_dialect=base_dialect,
                 names=args.eval_suite_names,
                 limit=args.eval_suite_limit,
+            )
+        )
+    elif args.generator == "wikisql":
+        from train.env.wikisql import (  # noqa: PLC0415
+            WikiSqlTaskConfig,
+            WikiSqlTaskGenerator,
+        )
+
+        gen = WikiSqlTaskGenerator(
+            WikiSqlTaskConfig(
+                target_dialect=base_dialect,
+                n_samples=args.wikisql_size,
+                split=args.wikisql_split,
+                seed=args.wikisql_seed,
+                sample_rows=args.wikisql_sample_rows,
             )
         )
     else:  # pragma: no cover - argparse choices guard this
         raise ValueError(f"unknown generator {args.generator!r}")
 
     gen.build()
-    runtime = DialectRuntime(dialect=args.dialect, catalog=gen.catalog)
-    runtime.setup()
-    return runtime, gen.all_tasks()
+    base_tasks = gen.all_tasks()
+
+    runtimes: dict[str, DialectRuntime] = {}
+    for d in args.dialects:
+        rt = DialectRuntime(dialect=d, catalog=gen.catalog)
+        rt.setup()
+        runtimes[d] = rt
+
+    if len(args.dialects) == 1:
+        # Tasks already target the one dialect via the generator's
+        # base_dialect. Nothing to expand.
+        return runtimes, base_tasks
+
+    if args.coverage_mode == "cross_product":
+        tasks = _expand_cross_product(base_tasks, args.dialects)
+    elif args.coverage_mode == "partition":
+        tasks = _expand_partition(base_tasks, args.dialects)
+    else:  # pragma: no cover - argparse choices guard this
+        raise ValueError(f"unknown coverage_mode {args.coverage_mode!r}")
+    return runtimes, tasks
+
+
+def _expand_cross_product(
+    base_tasks: list[SqlTask], dialects: list[str]
+) -> list[SqlTask]:
+    """Each base task -> one task per dialect (suffix ``__<dialect>`` on id)."""
+    out: list[SqlTask] = []
+    for task in base_tasks:
+        for d in dialects:
+            out.append(_relabel_task(task, dialect=d, suffix_id=True))
+    return out
+
+
+def _expand_partition(
+    base_tasks: list[SqlTask], dialects: list[str]
+) -> list[SqlTask]:
+    """Round-robin: task i -> dialects[i % len(dialects)]."""
+    out: list[SqlTask] = []
+    for i, task in enumerate(base_tasks):
+        d = dialects[i % len(dialects)]
+        out.append(_relabel_task(task, dialect=d, suffix_id=False))
+    return out
+
+
+def _relabel_task(task: SqlTask, *, dialect: str, suffix_id: bool) -> SqlTask:
+    """Clone a task with a different target dialect.
+
+    Gold rows / gold SQL / prompt / catalog are unchanged (data is
+    dialect-independent). Only ``meta.dialect`` and optionally
+    ``meta.task_id`` change. We use ``dataclasses.replace`` so any
+    future fields on :class:`SqlTask` keep round-tripping.
+    """
+    new_id = f"{task.meta.task_id}__{dialect}" if suffix_id else task.meta.task_id
+    new_meta = replace(task.meta, dialect=dialect, task_id=new_id)
+    return replace(task, meta=new_meta)
 
 
 def build_dataset(
     args: TrainArgs,
-    runtime: DialectRuntime,
+    runtimes: dict[str, DialectRuntime],
     tasks: list[SqlTask],
     tokenizer: Any | None = None,
 ) -> Dataset:
     """Translate the task list into a HF Dataset for GRPOTrainer.
 
-    Each row becomes ``{"prompt", "task_id", "dialect", "generator",
-    "gold_sql", "gold_rows_json"}``. ``GRPOTrainer`` auto-applies the
-    tokenizer's chat template to the ``prompt`` column; everything else
-    is forwarded to reward functions as kwargs (zipped per-row).
+    For multi-dialect runs, builds one sub-dataset per dialect with
+    that dialect's tool-aware system prompt (different dialect cards =
+    different system prompts) and concatenates them. The trainer sees
+    one dataset; reward functions dispatch per-row using the ``dialect``
+    column.
+
+    Each row carries ``{"prompt", "task_id", "dialect", "generator",
+    "gold_sql", "gold_rows_json"}``. The ``prompt`` column is in
+    chat-message form so ``GRPOTrainer`` auto-applies the tokenizer's
+    chat template; the rest are forwarded to reward functions.
     """
+    from datasets import concatenate_datasets  # noqa: PLC0415
+
     from train.env.trl import (  # noqa: PLC0415
         tasks_to_dataset,
         trl_agent_system_prompt,
@@ -269,23 +455,45 @@ def build_dataset(
     cap_tokens: int | None = None
     if tokenizer is not None:
         cap_tokens = args.max_seq_length // 2  # mirrors grpo_gsm8k.py
-    return tasks_to_dataset(
-        tasks=tasks,
-        runtime=runtime,
-        # Tool-aware system prompt: tells the model to call run_sql
-        # rather than emit raw SQL. Without this the rollout never goes
-        # through the tool and the reward function sees nothing.
-        system_prompt=trl_agent_system_prompt(runtime),
-        tokenizer=tokenizer,
-        max_prompt_tokens=cap_tokens,
-    )
+
+    multi = len(runtimes) > 1
+    by_dialect: dict[str, list[SqlTask]] = defaultdict(list)
+    for t in tasks:
+        by_dialect[t.meta.dialect].append(t)
+
+    parts = []
+    for dialect, dt in by_dialect.items():
+        if dialect not in runtimes:
+            raise RuntimeError(
+                f"task targets dialect {dialect!r} but no matching runtime "
+                f"was built (have {sorted(runtimes)})"
+            )
+        rt = runtimes[dialect]
+        sys_prompt = trl_agent_system_prompt(rt, with_dialect_arg=multi)
+        parts.append(
+            tasks_to_dataset(
+                tasks=dt,
+                runtime=rt,
+                system_prompt=sys_prompt,
+                tokenizer=tokenizer,
+                max_prompt_tokens=cap_tokens,
+            )
+        )
+    if not parts:
+        raise RuntimeError("build_dataset: no tasks to convert")
+    return parts[0] if len(parts) == 1 else concatenate_datasets(parts)
 
 
 # ---------------------------------------------------------------------------
 # Reward functions
 # ---------------------------------------------------------------------------
-def make_reward_funcs(args: TrainArgs, runtime: DialectRuntime) -> list[Any]:
-    """Build the per-component reward functions for GRPOTrainer."""
+def make_reward_funcs(args: TrainArgs, runtimes: dict[str, DialectRuntime]) -> list[Any]:
+    """Build the per-component reward functions for GRPOTrainer.
+
+    Reward functions look up each row's runtime via the dataset's
+    ``dialect`` column and re-execute the model's SQL against ground
+    truth. In single-dialect mode the dispatch is a no-op (one entry).
+    """
     from train.env.rewards import RewardConfig  # noqa: PLC0415
     from train.env.trl import make_reward_funcs as _make  # noqa: PLC0415
 
@@ -294,7 +502,7 @@ def make_reward_funcs(args: TrainArgs, runtime: DialectRuntime) -> list[Any]:
     else:
         cfg = RewardConfig()
     return _make(
-        runtime=runtime,
+        runtimes=runtimes,
         reward_config=cfg,
         max_turns=args.max_turns,
     )
@@ -306,20 +514,26 @@ def make_reward_funcs(args: TrainArgs, runtime: DialectRuntime) -> list[Any]:
 def _dry_run(args: TrainArgs) -> None:
     """Exercise dataset + reward pipeline without unsloth / torch / vllm.
 
-    Builds the runtime, generates the task list, formats the dataset,
+    Builds the runtime(s), generates the task list, formats the dataset,
     and scores a handful of synthetic completions through every reward
     function so you can eyeball the rubric before burning GPU time.
+
+    For multi-dialect runs the dry-run scores the same fake completions
+    once per distinct dialect appearing in the dataset, so you can see
+    that the dispatch is hooked up correctly (different reward
+    breakdowns per dialect because each parses + executes the same SQL
+    differently).
     """
     import json  # noqa: PLC0415
 
     print(
-        f"[dry-run] building runtime for dialect={args.dialect}, "
-        f"generator={args.generator}"
+        f"[dry-run] building runtimes for dialects={args.dialects}, "
+        f"generator={args.generator}, coverage={args.coverage_mode}"
     )
-    runtime, tasks = build_runtime_and_tasks(args)
+    runtimes, tasks = build_runtimes_and_tasks(args)
     print(f"[dry-run] generated {len(tasks)} tasks")
 
-    ds = build_dataset(args, runtime, tasks, tokenizer=None)
+    ds = build_dataset(args, runtimes, tasks, tokenizer=None)
     print(f"[dry-run] built dataset with {len(ds)} rows")
     sample = ds[0]
     print("[dry-run] sample row:")
@@ -328,89 +542,16 @@ def _dry_run(args: TrainArgs) -> None:
         suffix = "..." if len(msg["content"]) > 200 else ""
         print(f"  {msg['role']}: {head}{suffix}")
     print(f"  task_id: {sample['task_id']}")
+    print(f"  dialect: {sample['dialect']}")
     print(f"  gold_sql: {sample['gold_sql']}")
 
-    # Build synthetic completions to exercise the reward branches.
     gold_sql = sample["gold_sql"]
-    fake_completions = [
-        # 1. One-shot correct: tool calls gold SQL.
-        [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "run_sql",
-                            "arguments": {"sql_command": gold_sql},
-                        }
-                    }
-                ],
-            },
-        ],
-        # 2. Two-step recovery: bad SQL, then gold SQL.
-        [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "run_sql",
-                            "arguments": {"sql_command": "SELECT this_is_garbage"},
-                        }
-                    }
-                ],
-            },
-            {"role": "tool", "content": "{}"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "run_sql",
-                            "arguments": {"sql_command": gold_sql},
-                        }
-                    }
-                ],
-            },
-        ],
-        # 3. All parse errors: never produces valid SQL.
-        [
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "run_sql",
-                            "arguments": {"sql_command": "this is not sql"},
-                        }
-                    }
-                ],
-            },
-            {"role": "tool", "content": "{}"},
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [
-                    {
-                        "function": {
-                            "name": "run_sql",
-                            "arguments": {"sql_command": "still not sql"},
-                        }
-                    }
-                ],
-            },
-        ],
-        # 4. No tool calls at all: free-text response.
-        [{"role": "assistant", "content": "I don't know."}],
-    ]
+    fake_completions = _build_fake_completions(gold_sql)
     fake_prompts = [sample["prompt"]] * len(fake_completions)
     gold_rows_json = [sample["gold_rows_json"]] * len(fake_completions)
+    fake_dialects = [sample["dialect"]] * len(fake_completions)
 
-    funcs = make_reward_funcs(args, runtime)
+    funcs = make_reward_funcs(args, runtimes)
 
     print("[dry-run] reward breakdown:")
     header = ["#", *(fn.__name__ for fn in funcs), "sum"]
@@ -420,6 +561,7 @@ def _dry_run(args: TrainArgs) -> None:
             prompts=fake_prompts,
             completions=fake_completions,
             gold_rows_json=gold_rows_json,
+            dialect=fake_dialects,
         )
         for fn in funcs
     ]
@@ -432,7 +574,6 @@ def _dry_run(args: TrainArgs) -> None:
         row.append(f"{total:+.3f}")
         print("  " + "  ".join(f"{c:>26}" for c in row))
 
-    # Sanity: discount-mode "match on turn 1" should be 1.0.
     if args.reward_mode == "discounted" and all_scores:
         correctness_scores = next(
             scores for scores, fn in zip(all_scores, funcs, strict=False)
@@ -442,10 +583,73 @@ def _dry_run(args: TrainArgs) -> None:
             f"expected match-on-turn-1 correctness=1.0, got {correctness_scores[0]}"
         )
 
-    # Round-trip the gold_rows_json to make sure it parses cleanly.
+    # Multi-dialect spot-check: re-score the gold-SQL completion against
+    # every dialect in the run and confirm dispatch routes to each one.
+    if len(runtimes) > 1:
+        print("[dry-run] multi-dialect dispatch check:")
+        gold_completion = fake_completions[0]
+        correctness_fn = next(
+            fn for fn in funcs if fn.__name__ == "sql_correctness_reward"
+        )
+        for d in runtimes:
+            score = correctness_fn(
+                prompts=[sample["prompt"]],
+                completions=[gold_completion],
+                gold_rows_json=[sample["gold_rows_json"]],
+                dialect=[d],
+            )
+            print(f"  dialect={d}: correctness={score[0]:+.3f}")
+
     json.loads(sample["gold_rows_json"])
     print("\n[dry-run] OK -- dataset + tool + rewards look healthy. "
           "Run without --dry-run on a GPU box to actually train.")
+
+
+def _build_fake_completions(gold_sql: str) -> list[list[dict[str, Any]]]:
+    """Synthetic completions that exercise the reward branches.
+
+    Returns a list of TRL-shaped completions:
+
+    1. One-shot correct: tool calls gold SQL.
+    2. Two-step recovery: bad SQL, then gold SQL.
+    3. All parse errors: never produces valid SQL.
+    4. No tool calls at all: free-text response.
+
+    Same pattern as the GSM8K dry-run; here the SQL is real.
+    """
+    return [
+        [_assistant_call(gold_sql)],
+        [
+            _assistant_call("SELECT this_is_garbage"),
+            _tool_response("{}"),
+            _assistant_call(gold_sql),
+        ],
+        [
+            _assistant_call("this is not sql"),
+            _tool_response("{}"),
+            _assistant_call("still not sql"),
+        ],
+        [{"role": "assistant", "content": "I don't know."}],
+    ]
+
+
+def _assistant_call(sql: str) -> dict[str, Any]:
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "function": {
+                    "name": "run_sql",
+                    "arguments": {"sql_command": sql},
+                }
+            }
+        ],
+    }
+
+
+def _tool_response(content: str) -> dict[str, Any]:
+    return {"role": "tool", "content": content}
 
 
 # ---------------------------------------------------------------------------
@@ -460,8 +664,13 @@ def _configure_wandb(args: TrainArgs) -> str:
         return "none"
 
     os.environ["WANDB_PROJECT"] = args.wandb_project
+    dialects_tag = (
+        "-".join(args.dialects)
+        if len(args.dialects) <= 3
+        else f"{len(args.dialects)}dialects"
+    )
     run_name = args.wandb_run_name or (
-        f"{args.model_name.split('/')[-1]}-{args.dialect}-{args.max_steps}steps"
+        f"{args.model_name.split('/')[-1]}-{dialects_tag}-{args.max_steps}steps"
     )
     os.environ["WANDB_NAME"] = run_name
     os.environ.setdefault("WANDB_WATCH", "false")
@@ -512,14 +721,14 @@ def main() -> None:
     )
 
     print(
-        f"[grpo] building runtime for dialect={args.dialect}, "
-        f"generator={args.generator}"
+        f"[grpo] building runtimes for dialects={args.dialects}, "
+        f"generator={args.generator}, coverage={args.coverage_mode}"
     )
-    runtime, tasks = build_runtime_and_tasks(args)
-    print(f"[grpo] generated {len(tasks)} tasks")
+    runtimes, tasks = build_runtimes_and_tasks(args)
+    print(f"[grpo] generated {len(tasks)} tasks across {len(runtimes)} dialect(s)")
 
     print("[grpo] building dataset")
-    train_ds = build_dataset(args, runtime, tasks, tokenizer=tokenizer)
+    train_ds = build_dataset(args, runtimes, tasks, tokenizer=tokenizer)
     print(f"[grpo] kept {len(train_ds)} examples after length filter")
 
     prompt_lens = [
@@ -572,8 +781,15 @@ def main() -> None:
 
     from train.env.trl import make_run_sql_tool  # noqa: PLC0415
 
-    run_sql_tool = make_run_sql_tool(runtime)
-    reward_funcs = make_reward_funcs(args, runtime)
+    # In single-dialect mode we hand the tool factory the lone runtime
+    # directly (back-compat run_sql signature). In multi-dialect mode
+    # we hand it the dict so the model emits run_sql(sql_command, dialect=...)
+    # and dispatch happens at call time.
+    tool_target = (
+        next(iter(runtimes.values())) if len(runtimes) == 1 else runtimes
+    )
+    run_sql_tool = make_run_sql_tool(tool_target)
+    reward_funcs = make_reward_funcs(args, runtimes)
 
     trainer = GRPOTrainer(
         model=model,

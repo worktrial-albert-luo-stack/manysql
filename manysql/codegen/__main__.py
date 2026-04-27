@@ -1,9 +1,13 @@
 """CLI: ``python -m manysql.codegen`` / ``manysql-codegen``.
 
-Drives `manysql.codegen.pipeline.write_dialect_package` to materialize a
-new dialect package under `manysql/dialects/<name>/`. Designed to be the
-ergonomic counterpart to ``manysql-eval``: generate a dialect, then eval
-against it.
+Two subcommands:
+
+- ``gen`` materializes ONE dialect package from a ``DialectSpec`` (bundled
+  example or ``module.path:ATTR``). This is the original single-spec
+  workflow, just under a subcommand name.
+- ``batch`` runs an outer-loop campaign: design N diverse specs from a
+  free-form prior + structured knobs and fan them through the inner
+  pipeline. Drives ``manysql.codegen.batch.run_campaign``.
 
 Examples
 --------
@@ -11,16 +15,18 @@ Examples
     # list bundled spec examples
     manysql-codegen --list
 
-    # generate via the deterministic emitter (no LLM, near-instant)
-    manysql-codegen mild_postgres_ish
+    # generate a single dialect via the deterministic emitter
+    manysql-codegen gen mild_postgres_ish
 
     # ALWAYS run at least one LLM refinement pass on top of the deterministic
-    # baseline (LLM output is rolled back if it regresses the battery).
-    # Uses OPENAI_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_KEY from env.
-    manysql-codegen aggressive_alien --use-llm
+    # baseline. Uses OPENAI_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_KEY.
+    manysql-codegen gen aggressive_alien --use-llm
 
     # arbitrary spec from an importable Python attribute
-    manysql-codegen mypkg.specs:MY_SPEC --overwrite
+    manysql-codegen gen mypkg.specs:MY_SPEC --overwrite
+
+    # design 5 diverse dialects in one campaign
+    manysql-codegen batch --n 5 --prior "variants between mssql and snowflake"
 """
 
 from __future__ import annotations
@@ -29,10 +35,21 @@ import argparse
 import importlib
 import sys
 from pathlib import Path
+from typing import Any
 
 from rich.console import Console
 from rich.table import Table
 
+from manysql.codegen.batch import (
+    CAMPAIGNS_DIRNAME,
+    CampaignBrief,
+    CampaignConfig,
+    CampaignReporter,
+    CampaignResult,
+    LedgerEntry,
+    THEME_CHOICES,
+    run_campaign,
+)
 from manysql.codegen.pipeline import (
     BatteryError,
     PackageWriteResult,
@@ -54,61 +71,150 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="manysql-codegen",
         description=(
-            "Materialize a manysql dialect package from a DialectSpec. "
-            "Run `manysql-codegen --list` to see bundled examples."
+            "Generate manysql dialect packages. Use `gen` for a single "
+            "spec, `batch` for a multi-dialect campaign. Run `--list` to "
+            "see bundled example specs."
         ),
-    )
-    p.add_argument(
-        "spec",
-        nargs="?",
-        help="Either a bundled example name (mild_postgres_ish, "
-        "moderate_keyword_swap, aggressive_alien) or an importable "
-        "'module.path:ATTR' Python reference to a DialectSpec.",
     )
     p.add_argument(
         "--list",
         action="store_true",
-        help="List bundled spec examples and exit.",
+        help="List bundled spec examples and exit. Works without a subcommand.",
     )
-    p.add_argument(
+    sub = p.add_subparsers(dest="cmd")
+
+    _add_gen_parser(sub)
+    _add_batch_parser(sub)
+
+    return p
+
+
+def _add_gen_parser(sub: argparse._SubParsersAction) -> None:
+    gen = sub.add_parser(
+        "gen",
+        help="Materialize a single dialect package from a DialectSpec.",
+        description=(
+            "Run the codegen pipeline on one DialectSpec (bundled or "
+            "imported). The deterministic emitter is the default; "
+            "`--use-llm` adds an LLM refinement pass that is rolled back "
+            "if it regresses the parse/IR battery."
+        ),
+    )
+    gen.add_argument(
+        "spec",
+        help="Either a bundled example name (mild_postgres_ish, "
+        "moderate_keyword_swap, aggressive_alien) or an importable "
+        "'module.path:ATTR' Python reference to a DialectSpec.",
+    )
+    gen.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite an existing dialect package on disk.",
     )
-    p.add_argument(
+    gen.add_argument(
         "--use-llm",
         "--force-llm",
         dest="use_llm",
         action="store_true",
         help="Run at least one LLM refinement pass on grammar AND lowering, "
         "even when the deterministic baseline already passes the battery. "
-        "Regressions are rolled back to the deterministic baseline. Without "
-        "this flag the deterministic emitter alone produces the package.",
+        "Regressions are rolled back to the deterministic baseline.",
     )
-    p.add_argument(
+    gen.add_argument(
         "--model",
         default=None,
         help="Override the LLM model used for refinement. Without "
         "--use-llm this is informational only.",
     )
-    p.add_argument(
+    gen.add_argument(
         "--lifecycle",
         default="generated",
         choices=[lc.value for lc in Lifecycle],
         help="Initial lifecycle state to record (default: generated).",
     )
-    p.add_argument(
+    gen.add_argument(
         "--require-battery-pass",
         action="store_true",
         help="Refuse to write the package if the parse / IR-equivalence "
         "battery still has failures after refinement.",
     )
-    p.add_argument(
+    gen.add_argument(
         "--dialects-dir",
         default=None,
         help="Override the output root (default: manysql/dialects/).",
     )
-    return p
+
+
+def _add_batch_parser(sub: argparse._SubParsersAction) -> None:
+    batch = sub.add_parser(
+        "batch",
+        help="Design N diverse dialects in one campaign.",
+        description=(
+            "Outer-loop orchestrator: design N specs sequentially from a "
+            "free-form prior and structured knobs, then fan them through "
+            "the codegen pipeline in parallel. Writes a campaign manifest "
+            "under <dialects-dir>/_campaigns/<id>.json. Requires an LLM "
+            "backend (OPENAI/OPENROUTER/ANTHROPIC API key)."
+        ),
+    )
+    batch.add_argument(
+        "--n", type=int, required=True, help="Number of dialects to design."
+    )
+    batch.add_argument(
+        "--prior",
+        default=None,
+        help="Free-form description of the campaign vibe, e.g. "
+        "'variants between mssql and snowflake'. Expanded into a "
+        "structured campaign brief in one upfront LLM call.",
+    )
+    batch.add_argument(
+        "--theme",
+        choices=list(THEME_CHOICES),
+        default="mixed",
+        help="Divergence target. 'mixed' rotates mild/moderate/aggressive "
+        "across slots; explicit values use the same level for every slot.",
+    )
+    batch.add_argument(
+        "--inspired-by",
+        default="",
+        help="Comma-separated real-world dialects to draw from "
+        "(e.g. 'mysql,kdb,snowflake').",
+    )
+    batch.add_argument(
+        "--exclude-knobs",
+        default="",
+        help="Comma-separated DialectSpec field names that workers must "
+        "not change. Always wins over the prior.",
+    )
+    batch.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Recorded in the manifest for reproducibility tracking.",
+    )
+    batch.add_argument(
+        "--model",
+        default=None,
+        help="Override the LLM model used for both brief expansion and "
+        "per-dialect design.",
+    )
+    batch.add_argument(
+        "--max-concurrency",
+        type=int,
+        default=4,
+        help="Worker count for the inner-pipeline fan-out (default: 4).",
+    )
+    batch.add_argument(
+        "--require-battery-pass",
+        action="store_true",
+        help="Reject any dialect whose parse / IR battery still fails "
+        "after refinement.",
+    )
+    batch.add_argument(
+        "--dialects-dir",
+        default=None,
+        help="Override the output root (default: manysql/dialects/).",
+    )
 
 
 def _resolve_spec(ref: str) -> DialectSpec:
@@ -144,6 +250,11 @@ def _maybe_llm_client(use_llm: bool, model: str | None):
     """Return an LLMClient if requested, or None to drive the deterministic path."""
     if not use_llm:
         return None
+    return _build_llm_client(model)
+
+
+def _build_llm_client(model: str | None):
+    """Return an LLMClient or raise SystemExit with a friendly message."""
     try:
         from manysql.llm.client import LLMClient  # noqa: PLC0415
     except ImportError as exc:
@@ -151,9 +262,7 @@ def _maybe_llm_client(use_llm: bool, model: str | None):
     try:
         return LLMClient.from_env(default_model=model)
     except Exception as exc:
-        raise SystemExit(
-            f"error: --use-llm requested but no LLM backend configured: {exc}"
-        ) from exc
+        raise SystemExit(f"error: no LLM backend configured: {exc}") from exc
 
 
 def _print_examples(console: Console) -> None:
@@ -165,7 +274,7 @@ def _print_examples(console: Console) -> None:
     console.print(table)
 
 
-def _print_result(console: Console, result: PackageWriteResult) -> None:
+def _print_gen_result(console: Console, result: PackageWriteResult) -> None:
     console.print(
         f"[green]Wrote[/green] dialect [bold]{result.name}[/bold] -> {result.path}"
     )
@@ -186,20 +295,204 @@ def _print_result(console: Console, result: PackageWriteResult) -> None:
     )
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
-    console = Console()
+class RichCampaignReporter(CampaignReporter):
+    """Live progress for ``manysql-codegen batch`` runs.
 
-    if args.list or args.spec is None:
-        _print_examples(console)
-        if args.spec is None and not args.list:
-            console.print(
-                "[yellow]error[/yellow]: pass a spec name or --list",
-                style="dim",
+    Emits one line per stage transition so a long-running campaign is
+    legible in a plain terminal. The package phase runs concurrently, so
+    package events may interleave - this is fine, the messages are
+    self-identifying.
+    """
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+
+    def on_campaign_start(
+        self, *, config: CampaignConfig, model: str
+    ) -> None:
+        self._console.print(
+            f"[bold cyan]campaign[/bold cyan] starting: "
+            f"n={config.n}, theme={config.theme}, "
+            f"prior={(config.prior or '')!r}, model={model}"
+        )
+
+    def on_brief_start(self) -> None:
+        self._console.print("[dim]> expanding campaign brief...[/dim]")
+
+    def on_brief_done(
+        self, *, brief: CampaignBrief, elapsed_s: float
+    ) -> None:
+        inspirations = ", ".join(brief.inspirations) or "-"
+        axes = ", ".join(brief.suggested_axes[:5]) or "-"
+        if len(brief.suggested_axes) > 5:
+            axes += ", ..."
+        self._console.print(
+            f"[green]ok[/green] brief expanded in {elapsed_s:.1f}s "
+            f"[dim](inspirations: {inspirations}; axes: {axes})[/dim]"
+        )
+
+    def on_design_phase_start(self, *, schedule: list[str]) -> None:
+        self._console.print(
+            f"[bold cyan]design[/bold cyan] {len(schedule)} specs "
+            f"[dim](schedule: {', '.join(schedule)})[/dim]"
+        )
+
+    def on_design_slot_attempt(
+        self,
+        *,
+        slot: int,
+        total: int,
+        target_divergence: str,
+        attempt: int,
+    ) -> None:
+        if attempt == 1:
+            self._console.print(
+                f"  [dim]> slot {slot + 1}/{total} "
+                f"[{target_divergence}] designing...[/dim]"
             )
-            return 2
-        return 0
+        else:
+            self._console.print(
+                f"  [yellow]retry[/yellow] slot {slot + 1}/{total} "
+                f"[{target_divergence}] (attempt {attempt})"
+            )
 
+    def on_design_slot_done(
+        self,
+        *,
+        slot: int,
+        total: int,
+        entry: LedgerEntry,
+        divergence: str,
+        elapsed_s: float,
+    ) -> None:
+        axes = ", ".join(entry.primary_axes[:3]) or "-"
+        if len(entry.primary_axes) > 3:
+            axes += ", ..."
+        self._console.print(
+            f"  [green]ok[/green] slot {slot + 1}/{total} [{divergence}] "
+            f"-> [bold]{entry.name}[/bold] "
+            f"[dim](axes: {axes}; {elapsed_s:.1f}s)[/dim]"
+        )
+
+    def on_design_slot_failed(
+        self,
+        *,
+        slot: int,
+        total: int,
+        target_divergence: str,
+        reason: str,
+    ) -> None:
+        self._console.print(
+            f"  [red]fail[/red] slot {slot + 1}/{total} [{target_divergence}]: "
+            f"[dim]{_truncate(reason, 120)}[/dim]"
+        )
+
+    def on_package_phase_start(
+        self, *, n: int, max_concurrency: int
+    ) -> None:
+        self._console.print(
+            f"[bold cyan]package[/bold cyan] {n} dialects "
+            f"[dim](max_concurrency={max_concurrency})[/dim]"
+        )
+
+    def on_package_done(
+        self,
+        *,
+        name: str,
+        summary: dict[str, Any],
+        elapsed_s: float,
+    ) -> None:
+        bits = []
+        for stage in ("grammar_ok", "lowering_ok"):
+            value = summary.get(stage)
+            if value is True:
+                bits.append(f"{stage[:-3]}=ok")
+            elif value is False:
+                bits.append(f"[yellow]{stage[:-3]}=warn[/yellow]")
+        detail = ", ".join(bits) if bits else "-"
+        self._console.print(
+            f"  [green]ok[/green] packaged [bold]{name}[/bold] "
+            f"[dim]({detail}; {elapsed_s:.1f}s)[/dim]"
+        )
+
+    def on_package_failed(
+        self,
+        *,
+        name: str,
+        reason: str,
+        elapsed_s: float,
+    ) -> None:
+        self._console.print(
+            f"  [red]fail[/red] packaging [bold]{name}[/bold] "
+            f"[dim]({elapsed_s:.1f}s)[/dim]: [dim]{_truncate(reason, 120)}[/dim]"
+        )
+
+    def on_manifest_written(self, *, path: Path) -> None:
+        self._console.print(f"[dim]> manifest -> {path}[/dim]")
+
+    def on_campaign_done(self, *, result: CampaignResult) -> None:
+        self._console.print(
+            f"[bold cyan]done[/bold cyan] drafted={len(result.drafted)}, "
+            f"packaged={len(result.packaged)}, "
+            f"spec_failed={len(result.failed_specs)}, "
+            f"package_failed={len(result.failed_packages)}"
+        )
+
+
+def _truncate(s: str, limit: int) -> str:
+    s = s.strip()
+    if len(s) <= limit:
+        return s
+    return s[: limit - 1] + "..."
+
+
+def _print_campaign_result(
+    console: Console, result: CampaignResult, dialects_root: Path
+) -> None:
+    table = Table(title=f"campaign {result.id}")
+    table.add_column("slot", justify="right")
+    table.add_column("name")
+    table.add_column("divergence")
+    table.add_column("axes")
+    table.add_column("status")
+
+    packaged_names = {p.name for p in result.packaged}
+    failed_pkg_names = {f["name"]: f for f in result.failed_packages}
+
+    for slot, (spec, entry) in enumerate(result.drafted):
+        if entry.name in packaged_names:
+            status = "[green]packaged[/green]"
+        elif entry.name in failed_pkg_names:
+            reason = failed_pkg_names[entry.name].get("reason", "")
+            status = f"[red]package_failed[/red] ({reason[:40]})"
+        else:
+            status = "[yellow]drafted[/yellow]"
+        table.add_row(
+            str(slot),
+            entry.name,
+            spec.divergence.value,
+            ", ".join(entry.primary_axes) or "-",
+            status,
+        )
+    for f in result.failed_specs:
+        table.add_row(
+            str(f.get("slot", "?")),
+            "-",
+            str(f.get("target_divergence", "?")),
+            "-",
+            f"[red]spec_failed[/red] ({str(f.get('reason', ''))[:40]})",
+        )
+    console.print(table)
+    console.print(
+        f"manifest: [cyan]{dialects_root / CAMPAIGNS_DIRNAME / (result.id + '.json')}[/cyan]"
+    )
+    console.print(
+        f"summary: drafted={len(result.drafted)}, packaged={len(result.packaged)}, "
+        f"spec_failed={len(result.failed_specs)}, package_failed={len(result.failed_packages)}"
+    )
+
+
+def _run_gen(args: argparse.Namespace, console: Console) -> int:
     spec = _resolve_spec(args.spec)
     llm_client = _maybe_llm_client(args.use_llm, args.model)
     root = Path(args.dialects_dir) if args.dialects_dir else DIALECTS_DIR
@@ -224,15 +517,77 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[red]battery failed:[/red] {exc}")
         return 1
 
-    _print_result(console, result)
+    _print_gen_result(console, result)
 
-    # Sanity-check that the registry can load what we just wrote.
     try:
         DialectRegistry(root).load(result.name)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - surface load errors clearly
         console.print(f"[red]wrote files but registry failed to load them:[/red] {exc}")
         return 1
     return 0
+
+
+def _run_batch(args: argparse.Namespace, console: Console) -> int:
+    if args.n <= 0:
+        console.print("[red]error[/red]: --n must be positive")
+        return 2
+
+    inspired_by = tuple(_split_csv(args.inspired_by))
+    exclude_knobs = tuple(_split_csv(args.exclude_knobs))
+
+    config = CampaignConfig(
+        n=args.n,
+        prior=args.prior,
+        theme=args.theme,
+        inspired_by=inspired_by,
+        exclude_knobs=exclude_knobs,
+        seed=args.seed,
+        model=args.model,
+        max_concurrency=args.max_concurrency,
+        require_battery_pass=args.require_battery_pass,
+    )
+    root = Path(args.dialects_dir) if args.dialects_dir else DIALECTS_DIR
+
+    llm = _build_llm_client(args.model)
+    reporter = RichCampaignReporter(console)
+    try:
+        result = run_campaign(
+            config, llm=llm, dialects_root=root, reporter=reporter
+        )
+    finally:
+        llm.close()
+
+    console.print()
+    _print_campaign_result(console, result, root)
+    if not result.drafted and not result.packaged:
+        return 1
+    return 0
+
+
+def _split_csv(value: str) -> list[str]:
+    return [v.strip() for v in (value or "").split(",") if v.strip()]
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    console = Console()
+
+    if args.list:
+        _print_examples(console)
+        return 0
+
+    if args.cmd == "gen":
+        return _run_gen(args, console)
+    if args.cmd == "batch":
+        return _run_batch(args, console)
+
+    parser.print_help()
+    console.print(
+        "\n[yellow]error[/yellow]: pick a subcommand "
+        "([cyan]gen[/cyan] or [cyan]batch[/cyan]) or pass [cyan]--list[/cyan]."
+    )
+    return 2
 
 
 if __name__ == "__main__":

@@ -139,7 +139,8 @@ Three CLI entry points (all installed by `uv sync`):
 
 | Command | Purpose |
 | --- | --- |
-| `manysql-codegen <spec>` | Materialize a dialect package from a `DialectSpec` (or one of the bundled examples). `--use-llm` runs at least one LLM refinement pass on top of the deterministic baseline. |
+| `manysql-codegen gen <spec>` | Materialize a dialect package from a `DialectSpec` (or one of the bundled examples). `--use-llm` runs at least one LLM refinement pass on top of the deterministic baseline. |
+| `manysql-codegen batch --n N --prior <vibe>` | Outer-loop campaign: design N diverse specs (sequentially, with a running ledger for diversity) from a free-form prior + structured knobs, then fan them through the codegen pipeline in parallel. Manifest at `manysql/dialects/_campaigns/<id>.json`. Requires an LLM key. |
 | `manysql-dialect diff <name>` | Side-by-side diff of a generated dialect's reskinned battery vs. the canonical reference SQL. Useful for "did this surface knob actually take effect?" |
 | `manysql-eval` (alias `eval`) | Pluggable LLM SQL benchmark: NL question → model SQL → execute → retry on error → score. Backends: `sqlite` (default, with a synthetic GitHub-events seed), `tinybird`, `synthetic` (a manysql-generated dialect with a SQLite reference auto-attached for ground truth). LLM providers: `openai`, `openrouter`, `vllm`. See `eval/README.md` for the full surface. |
 
@@ -181,9 +182,61 @@ eval/                # pluggable LLM SQL benchmark (see eval/README.md)
 tests/               # pytest suite (oracles, harness, golden queries,
                      #   codegen pipeline, registry, property fuzzing,
                      #   cross-dialect differential, ...)
-train/               # GRPO/RLVR training entrypoints (template adapted
-                     #   from a GSM8K reference; SQL adaptation hooks
-                     #   marked inline)
+train/               # GRPO/RLVR training entrypoints + SQL RL env
+                     #   (multi-turn dialect runtime, reward shaping,
+                     #   TRL adapter, WikiSQL data source). See
+                     #   train/env/README.md for the full surface.
+```
+
+## RL training over synthetic dialects
+
+`train/env/` is a multi-turn RL environment over manysql synthetic
+dialects: agent reads a system prompt + a question, calls a `run_sql`
+tool, and either matches the gold rows (success) or gets a parse /
+runtime error trace it can iterate on next turn. Reward is a function
+of correctness *and* the number of turns it took to get there. See
+`train/env/README.md` for the architecture and adapter API.
+
+`train/grpo_sql.py` is the GRPO fine-tuning entry point (Unsloth + TRL
++ vLLM). Three task generators ship:
+
+| Generator | Source | Best for |
+|---|---|---|
+| `golden` (default) | Cross-dialect translation tasks built from `manysql.golden.queries` on the canonical 5-table catalog. | Teaching the model to *speak* a synthetic dialect (mechanical translation, no NL ambiguity). |
+| `eval_suite` | NL questions from `eval.dataset.questions` over the synthetic `github_events` corpus. | End-to-end NL→SQL on the same benchmark as `manysql-eval`. |
+| `wikisql` | NL/table/answer triples sampled from `Salesforce/wikisql`. Each task carries its own small Wikipedia table; column names are sanitized to safe `c_*` identifiers. | NL→SQL on real, diverse schemas (1k–80k tasks). |
+
+Multi-dialect curricula are first-class: pass
+`--dialects aggressive_alien,mild_postgres_ish,tsql_ish` and the same
+training run trains one model on all three at once. The `run_sql` tool
+gains a `dialect` argument and the system prompt tags every row with
+`Dialect: <name>` so the model learns to route. Two coverage modes:
+
+| Mode | Effect |
+|---|---|
+| `partition` (default) | Round-robin assign each task to one dialect (N rows total). |
+| `cross_product` | Emit each task once per dialect (N × M rows; `task_id` suffixed `__<dialect>`). |
+
+Each dialect's system prompt includes its **dialect card**
+(`manysql.dialects.card.render_dialect_card`): surface divergences,
+canonical patterns, function aliases, and a few worked examples — same
+priors `manysql-eval` uses, by design.
+
+```bash
+# CPU dry-run (no GPU, no Unsloth/vLLM): exercises dataset + tool +
+# every reward-component end-to-end on a handful of synthetic
+# completions. Prints the reward breakdown + multi-dialect dispatch.
+uv run python -m train.grpo_sql \
+    --dialects aggressive_alien,tsql_ish \
+    --generator wikisql --wikisql-size 32 \
+    --dry-run
+
+# GPU box: real training. See train/grpo_sql.py module docstring for
+# the full uv install incantation (unsloth + trl + vllm + transformers).
+python train/grpo_sql.py \
+    --dialects aggressive_alien,mild_postgres_ish,tsql_ish \
+    --generator wikisql --wikisql-size 2000 \
+    --max-steps 500
 ```
 
 ## Setup
@@ -197,7 +250,7 @@ cp .env.example .env  # add OPENAI_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_
 
 ```bash
 # 1. Generate a dialect package (deterministic, ~instant).
-uv run manysql-codegen mild_postgres_ish
+uv run manysql-codegen gen mild_postgres_ish
 
 # 2. Inspect what changed vs. the reference surface.
 uv run manysql-dialect diff mild_postgres_ish
@@ -220,7 +273,16 @@ For an aggressive surface where the deterministic emitter alone won't
 suffice, force the LLM refine loop:
 
 ```bash
-uv run manysql-codegen aggressive_alien --use-llm --overwrite
+uv run manysql-codegen gen aggressive_alien --use-llm --overwrite
+```
+
+To populate a benchmark with many synthetic dialects in one shot:
+
+```bash
+uv run manysql-codegen batch --n 5 \
+    --prior "variants between mssql and snowflake" \
+    --theme mixed \
+    --inspired-by sql_server,snowflake
 ```
 
 The pytest suite covers the IR, executor, every oracle, the harness, the

@@ -29,7 +29,7 @@ Examples
 
     # run against a manysql-generated dialect (auto-attaches a SQLite
     # reference executor for ground truth):
-    uv run manysql-codegen mild_postgres_ish
+    uv run manysql-codegen gen mild_postgres_ish
     python -m eval --backend synthetic \\
         --synthetic-dialect mild_postgres_ish \\
         --provider openai --model gpt-4o-mini --limit 5

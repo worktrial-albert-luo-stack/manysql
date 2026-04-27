@@ -83,7 +83,7 @@ def _cmd_diff(args: argparse.Namespace) -> int:
         )
         console.print(
             "[yellow]hint:[/yellow] run "
-            f"[cyan]manysql-codegen {args.name}[/cyan] first, or pass "
+            f"[cyan]manysql-codegen gen {args.name}[/cyan] first, or pass "
             "--dialects-dir to point at the right registry root.",
         )
         return 1

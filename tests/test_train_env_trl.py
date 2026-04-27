@@ -293,7 +293,7 @@ def test_reconstruct_turns_empty_completion(runtime: DialectRuntime) -> None:
 
 
 def test_make_reward_funcs_default_components(runtime: DialectRuntime) -> None:
-    funcs = make_reward_funcs(runtime=runtime, reward_config=RewardConfig())
+    funcs = make_reward_funcs(runtimes=runtime, reward_config=RewardConfig())
     names = [f.__name__ for f in funcs]
     # Default = every component except `total` (GRPO sums rewards itself).
     assert names == [
@@ -309,7 +309,7 @@ def test_make_reward_funcs_default_components(runtime: DialectRuntime) -> None:
 
 def test_make_reward_funcs_custom_components(runtime: DialectRuntime) -> None:
     funcs = make_reward_funcs(
-        runtime=runtime, components=["total", "correctness"]
+        runtimes=runtime, components=["total", "correctness"]
     )
     names = [f.__name__ for f in funcs]
     assert names == ["sql_total_reward", "sql_correctness_reward"]
@@ -319,7 +319,7 @@ def test_make_reward_funcs_rejects_unknown_component(
     runtime: DialectRuntime,
 ) -> None:
     with pytest.raises(ValueError, match="unknown reward components"):
-        make_reward_funcs(runtime=runtime, components=["bogus"])
+        make_reward_funcs(runtimes=runtime, components=["bogus"])
 
 
 def test_reward_components_constant_matches_breakdown_fields() -> None:
@@ -334,7 +334,7 @@ def test_reward_funcs_zero_when_gold_rows_missing(runtime: DialectRuntime) -> No
     """Reward fns must return zeros (not crash) if the dataset wasn't
     built with our schema. Avoids silently rewarding random SQL.
     """
-    fn = make_reward_funcs(runtime=runtime, components=["total"])[0]
+    fn = make_reward_funcs(runtimes=runtime, components=["total"])[0]
     out = fn(prompts=[[]] * 2, completions=[[], []])
     assert out == [0.0, 0.0]
 
@@ -344,7 +344,7 @@ def test_reward_funcs_correct_sql_one_shot_unit_reward(
 ) -> None:
     """Discounted mode, one-shot match: correctness == discount^0 == 1.0."""
     funcs = make_reward_funcs(
-        runtime=runtime,
+        runtimes=runtime,
         reward_config=RewardConfig.discounted(),
         max_turns=3,
     )
@@ -388,7 +388,7 @@ def test_reward_funcs_decay_with_turn_index(
     fn = next(
         f
         for f in make_reward_funcs(
-            runtime=runtime, reward_config=RewardConfig.discounted()
+            runtimes=runtime, reward_config=RewardConfig.discounted()
         )
         if f.__name__ == "sql_correctness_reward"
     )
@@ -408,7 +408,7 @@ def test_reward_funcs_batch_independence(
     fn = next(
         f
         for f in make_reward_funcs(
-            runtime=runtime, reward_config=RewardConfig.discounted()
+            runtimes=runtime, reward_config=RewardConfig.discounted()
         )
         if f.__name__ == "sql_correctness_reward"
     )

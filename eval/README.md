@@ -119,7 +119,7 @@ generated dialect:
 uv run manysql-codegen --list
 
 # 2. Generate the dialect package (deterministic emitter; near-instant).
-uv run manysql-codegen mild_postgres_ish
+uv run manysql-codegen gen mild_postgres_ish
 
 # 3. Confirm the dialect engine can run the (SQLite-flavored) reference
 #    SQL on the seed dataset.
@@ -148,7 +148,7 @@ To use an LLM to refine the grammar / lowering instead of the
 deterministic templates:
 
 ```bash
-uv run manysql-codegen aggressive_alien --use-llm --overwrite
+uv run manysql-codegen gen aggressive_alien --use-llm --overwrite
 ```
 
 This needs `OPENAI_API_KEY` or `OPENROUTER_API_KEY` (configurable via

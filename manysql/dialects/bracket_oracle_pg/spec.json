@@ -1,0 +1,166 @@
+{
+  "description": "SQL Server bracket-quoting meets Oracle FETCH FIRST row-limiting and Postgres ::cast syntax, with CONCAT-only string joining and upper-case folding.",
+  "divergence_level": "moderate",
+  "inspired_by": [
+    "sql_server",
+    "oracle",
+    "postgres"
+  ],
+  "name": "bracket_oracle_pg",
+  "notes": "Hybrid of SQL Server (bracket quoting, INNER/OUTER JOIN verbosity), Oracle (MINUS for EXCEPT, NVL, SYSDATE, MOD operator, upper-case fold, OFFSET/FETCH row limiting), and Postgres (::cast, NULLS FIRST/LAST, IS NOT DISTINCT FROM). String concatenation is CONCAT-only despite || being the surface concat_op \u2014 the semantic layer enforces CONCAT_only. Requires semicolons like Oracle.",
+  "semantic_overrides": {
+    "array_base_index": 1,
+    "boolean_truthiness": "strict",
+    "count_distinct_null": "excluded",
+    "division_by_zero": "error",
+    "group_by_accepts_select_aliases": false,
+    "identifier_case_fold": "upper",
+    "ilike_supported": false,
+    "integer_division": "truncate",
+    "like_case_sensitive": true,
+    "null_order_default_asc": "last",
+    "null_order_default_desc": "first",
+    "null_safe_eq_supported": true,
+    "quoted_identifiers_case_sensitive": true,
+    "select_resolves_through_group_by": false,
+    "set_op_default": "distinct",
+    "string_concat_op": "CONCAT_only",
+    "sum_of_empty_returns_null": true,
+    "window_default_frame": "range_unbounded_to_current"
+  },
+  "semantics": {
+    "array_base_index": 1,
+    "boolean_truthiness": "strict",
+    "count_distinct_null": "excluded",
+    "division_by_zero": "error",
+    "group_by_accepts_select_aliases": false,
+    "identifier_case_fold": "upper",
+    "ilike_supported": false,
+    "integer_division": "truncate",
+    "like_case_sensitive": true,
+    "null_order_default_asc": "last",
+    "null_order_default_desc": "first",
+    "null_safe_eq_supported": true,
+    "quoted_identifiers_case_sensitive": true,
+    "select_resolves_through_group_by": false,
+    "set_op_default": "distinct",
+    "string_concat_op": "CONCAT_only",
+    "sum_of_empty_returns_null": true,
+    "window_default_frame": "range_unbounded_to_current"
+  },
+  "surface": {
+    "add_op": "+",
+    "as_keyword": "AS",
+    "between_keyword": "BETWEEN",
+    "case_keyword": "CASE",
+    "case_syntax": "case_when",
+    "cast_keyword": "CAST",
+    "cast_syntax": "double_colon",
+    "comment_styles": [
+      "line_dash_dash",
+      "block_c"
+    ],
+    "concat_op": "||",
+    "distinct_keyword": "DISTINCT",
+    "div_op": "/",
+    "else_keyword": "ELSE",
+    "end_keyword": "END",
+    "eq_op": "=",
+    "except_keyword": "MINUS",
+    "exists_keyword": "EXISTS",
+    "from_keyword": "FROM",
+    "function_aliases": {
+      "COALESCE": [
+        "COALESCE",
+        "NVL"
+      ],
+      "LENGTH": [
+        "LENGTH",
+        "LEN"
+      ],
+      "LOWER": [
+        "LOWER"
+      ],
+      "NOW": [
+        "SYSDATE",
+        "CURRENT_TIMESTAMP"
+      ],
+      "SUBSTRING": [
+        "SUBSTR"
+      ],
+      "TRIM": [
+        "TRIM"
+      ],
+      "UPPER": [
+        "UPPER"
+      ]
+    },
+    "group_by_keyword": "GROUP BY",
+    "gt_op": ">",
+    "gte_op": ">=",
+    "having_keyword": "HAVING",
+    "identifier_quote": "bracket",
+    "ilike_keyword": "ILIKE",
+    "in_keyword": "IN",
+    "intersect_keyword": "INTERSECT",
+    "is_keyword": "IS",
+    "join_cross_keyword": "CROSS JOIN",
+    "join_full_keyword": "FULL OUTER JOIN",
+    "join_inner_keyword": "INNER JOIN",
+    "join_left_keyword": "LEFT OUTER JOIN",
+    "join_right_keyword": "RIGHT OUTER JOIN",
+    "join_syntax": "ansi",
+    "like_keyword": "LIKE",
+    "limit_keyword": "LIMIT",
+    "limit_syntax": "offset_fetch",
+    "lt_op": "<",
+    "lte_op": "<=",
+    "mod_op": "MOD",
+    "mul_op": "*",
+    "neq_op": [
+      "<>",
+      "!="
+    ],
+    "not_keyword": "NOT",
+    "null_keyword": "NULL",
+    "null_literal": "NULL",
+    "null_safe_eq_op": "IS NOT DISTINCT FROM",
+    "nulls_first_keyword": "NULLS FIRST",
+    "nulls_last_keyword": "NULLS LAST",
+    "order_by_keyword": "ORDER BY",
+    "order_by_position": "after_select",
+    "requires_semicolon": true,
+    "select_keyword": "SELECT",
+    "statement_terminator": ";",
+    "string_quote": "single",
+    "sub_op": "-",
+    "then_keyword": "THEN",
+    "union_keyword": "UNION",
+    "when_keyword": "WHEN",
+    "where_keyword": "WHERE",
+    "wildcard_char": "star",
+    "with_keyword": "WITH"
+  },
+  "surface_features": [
+    "between",
+    "case_when",
+    "cast_via_double_colon",
+    "ctes",
+    "exists",
+    "group_by",
+    "having",
+    "in_list",
+    "in_subquery",
+    "inner_left_right_full_cross_join",
+    "is_distinct_from",
+    "is_null",
+    "join_using",
+    "like",
+    "limit_via_offset_fetch",
+    "order_by_nulls_first_last",
+    "select_distinct",
+    "subqueries_uncorrelated",
+    "where",
+    "windows_basic"
+  ]
+}

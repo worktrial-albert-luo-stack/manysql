@@ -44,6 +44,22 @@ def emit_lowering(spec: DialectSpec) -> str:
             "Use the LLM-refined emitter."
         )
 
+    return emit_lowering_seed(spec)
+
+
+def emit_lowering_seed(spec: DialectSpec) -> str:
+    """Return a best-effort deterministic lowering, even for structural specs.
+
+    Unlike :func:`emit_lowering` this never raises. It applies every
+    surface-only patch we can express deterministically (currently the
+    ``_lower_limit`` patch for non-``LIMIT_OFFSET`` syntaxes) on top of
+    the reference lowering. Structural changes (e.g. ``CaseSyntax.SWITCH``,
+    ``JoinSyntax.PIPELINED``) are *not* applied — the result is intended as
+    a *seed* for the LLM lane so the model only has to fix what's actually
+    structural, instead of rewriting helpers like ``_lower_limit`` from
+    scratch (which is exactly where the LLM tends to misread Lark's
+    tokenization model).
+    """
     base = _read_reference_lowering()
     new_header = _GENERATED_HEADER_TEMPLATE.format(name=spec.name)
     out = base.replace(_REFERENCE_LOWERING_HEADER, new_header, 1)

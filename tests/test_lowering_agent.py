@@ -13,10 +13,13 @@ from manysql.codegen.ir_battery import (
 from manysql.codegen.lowering_agent import (
     LoweringAgentResult,
     _load_module,
+    _parse_failure_trees,
+    _refine_with_llm,
     _strip_code_fences,
     generate_lowering,
 )
-from manysql.codegen.lowering_emit import emit_lowering
+from manysql.codegen.lowering_emit import emit_lowering, emit_lowering_seed
+from manysql.codegen.ir_battery import IRDivergence
 from manysql.llm.client import (
     LLMBackend,
     LLMClient,
@@ -24,7 +27,13 @@ from manysql.llm.client import (
     LLMResponse,
     NullLLMClient,
 )
-from manysql.spec.dialect import DialectSpec, JoinSyntax, SurfaceSpec
+from manysql.spec.dialect import (
+    CaseSyntax,
+    DialectSpec,
+    JoinSyntax,
+    LimitSyntax,
+    SurfaceSpec,
+)
 from manysql.spec.examples import EXAMPLE_SPECS
 
 
@@ -245,3 +254,190 @@ def test_generate_lowering_force_llm_rolls_back_on_regression() -> None:
     sources = [a.source for a in result.attempts]
     assert sources[0] == "deterministic"
     assert "llm" in sources
+
+
+# ---- IR battery: skip impossible round-trips per surface ------------------
+
+
+def test_ir_battery_keeps_limit_offset_for_capable_surfaces() -> None:
+    """LIMIT_OFFSET and OFFSET_FETCH can express OFFSET, so the
+    `limit_offset` battery item must be kept."""
+    for syntax in (LimitSyntax.LIMIT_OFFSET, LimitSyntax.OFFSET_FETCH):
+        spec = DialectSpec(name=f"capable_{syntax.value}", surface=SurfaceSpec(limit_syntax=syntax))
+        labels = {it.label for it in build_ir_battery(spec)}
+        assert "limit_offset" in labels, f"{syntax.value} must keep limit_offset"
+
+
+def test_ir_battery_drops_limit_offset_for_offset_blind_surfaces() -> None:
+    """HEAD_N/SAMPLE_N/TOP_N silently drop OFFSET in the surface rewrite
+    (`_format_limit_clause`), so any plan with offset != 0 cannot
+    round-trip. The IR battery must skip the `limit_offset` item rather
+    than saddle the lowering with an impossible reconstruction."""
+    for syntax in (LimitSyntax.HEAD_N, LimitSyntax.SAMPLE_N, LimitSyntax.TOP_N):
+        spec = DialectSpec(name=f"blind_{syntax.value}", surface=SurfaceSpec(limit_syntax=syntax))
+        labels = {it.label for it in build_ir_battery(spec)}
+        assert "limit_offset" not in labels, (
+            f"{syntax.value} cannot encode OFFSET; build_ir_battery must skip it"
+        )
+        # Sanity: `limit_only` is unaffected — these surfaces all encode a row count.
+        assert "limit_only" in labels
+
+
+# ---- Lowering seed: deterministic patches survive structural specs --------
+
+
+def test_emit_lowering_seed_patches_offset_fetch_limit_for_structural_spec() -> None:
+    """`emit_lowering` raises for case_syntax=SWITCH, but `emit_lowering_seed`
+    must still return the patched _lower_limit body so the LLM lane can use
+    it as a starting point instead of rewriting the helper from scratch."""
+    spec = DialectSpec(
+        name="switch_offset_fetch",
+        surface=SurfaceSpec(
+            case_syntax=CaseSyntax.SWITCH,
+            limit_syntax=LimitSyntax.OFFSET_FETCH,
+        ),
+    )
+    with pytest.raises(NotImplementedError):
+        emit_lowering(spec)
+    seed = emit_lowering_seed(spec)
+    # The OFFSET_FETCH-specific body assigns offset=ints[0], limit=ints[1].
+    assert "offset = ints[0]" in seed
+    assert "limit = ints[1]" in seed
+
+
+def test_emit_lowering_seed_returns_unmodified_for_simple_spec() -> None:
+    """For a fully surface-only spec the seed is identical to `emit_lowering`."""
+    spec = EXAMPLE_SPECS["mild_postgres_ish"]
+    assert emit_lowering_seed(spec) == emit_lowering(spec)
+
+
+def test_generate_lowering_seeds_llm_with_patched_lowering(monkeypatch) -> None:
+    """When the deterministic emitter raises, the agent must still seed the
+    LLM with `emit_lowering_seed(spec)` so OFFSET_FETCH lowering is
+    pre-baked instead of reinvented by the model."""
+    spec = DialectSpec(
+        name="seeded_switch",
+        surface=SurfaceSpec(
+            case_syntax=CaseSyntax.SWITCH,
+            limit_syntax=LimitSyntax.OFFSET_FETCH,
+        ),
+    )
+
+    captured: dict = {}
+
+    class CapturingClient(LLMClient):
+        def __init__(self) -> None:
+            self.config = LLMConfig(
+                backend=LLMBackend.OPENAI, api_key="x",
+                base_url="x", default_model="x",
+            )
+
+        def chat(self, **kwargs):
+            captured["user"] = kwargs.get("user", "")
+            # Return something obviously broken so the agent doesn't accept
+            # it. We only care that the prompt contained the seed.
+            return LLMResponse(
+                text="def lower(tree, config, catalog):\n    return None\n",
+                model="fake", backend=self.config.backend,
+                prompt_tokens=0, completion_tokens=0,
+            )
+
+        def close(self) -> None:
+            return None
+
+    generate_lowering(spec, llm_client=CapturingClient(), max_iterations=1)
+    assert "offset = ints[0]" in captured["user"], (
+        "the LLM prompt should contain the deterministic OFFSET_FETCH seed"
+    )
+
+
+# ---- Refine prompt includes parse trees for failing items -----------------
+
+
+def test_refine_prompt_includes_dialect_parse_tree() -> None:
+    """The fix-mode prompt must show the actual Lark parse tree of each
+    failing item. Without this, the model can't see that anonymous keyword
+    terminals are filtered out of the tree and ends up writing token
+    state machines that never match anything (the sqlite_bigquery_db2
+    failure mode in batch-15)."""
+    spec = EXAMPLE_SPECS["mild_postgres_ish"]
+    grammar = emit_grammar(spec)
+    item = build_ir_battery(spec)[0]
+
+    diverg = IRDivergence(
+        label=item.label,
+        ref_sql=item.ref_sql,
+        dialect_sql=item.dialect_sql,
+        ref_plan="ref",
+        dialect_plan="dial",
+        error="plan mismatch",
+    )
+
+    captured: dict = {}
+
+    class CapturingClient(LLMClient):
+        def __init__(self) -> None:
+            self.config = LLMConfig(
+                backend=LLMBackend.OPENAI, api_key="x",
+                base_url="x", default_model="x",
+            )
+
+        def chat(self, **kwargs):
+            captured["user"] = kwargs.get("user", "")
+            return LLMResponse(
+                text="ok", model="fake", backend=self.config.backend,
+                prompt_tokens=0, completion_tokens=0,
+            )
+
+        def close(self) -> None:
+            return None
+
+    from manysql.codegen.ir_battery import IREquivalenceReport
+    report = IREquivalenceReport(items=[item], divergences=[diverg])
+    _refine_with_llm(
+        spec=spec,
+        lowering_text="# unused\n",
+        grammar_text=grammar,
+        items=[item],
+        report=report,
+        llm_client=CapturingClient(),
+        polish=False,
+    )
+    user = captured["user"]
+    assert "dialect parse tree" in user
+    # The first canonical SQL is `SELECT * FROM employees`, whose tree
+    # contains a `select_core` rule. That label should make it into the
+    # rendered tree.
+    assert "select_core" in user
+
+
+def test_parse_failure_trees_handles_unparseable_items() -> None:
+    """If a failing item happens not to parse with the dialect grammar
+    (e.g. mid-iteration the LLM left grammar inconsistent), we should
+    annotate the prompt with the parse error instead of raising."""
+    grammar = "start: \"x\""  # accepts only "x"
+    diverg = IRDivergence(
+        label="bogus",
+        ref_sql="SELECT 1",
+        dialect_sql="SELECT 1",
+        ref_plan=None,
+        dialect_plan=None,
+        error="something",
+    )
+    out = _parse_failure_trees(grammar, [diverg])
+    assert "parse failed" in out["bogus"]
+
+
+def test_parse_failure_trees_handles_grammar_build_failure() -> None:
+    """A broken grammar should not crash the prompt builder; every
+    divergence should get the same explanatory error annotation."""
+    diverg = IRDivergence(
+        label="x",
+        ref_sql="",
+        dialect_sql="",
+        ref_plan=None,
+        dialect_plan=None,
+        error="",
+    )
+    out = _parse_failure_trees("start: NEVER_TERMINAL", [diverg])
+    assert "grammar build failed" in out["x"]

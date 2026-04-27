@@ -28,9 +28,20 @@ from lark.exceptions import LarkError
 from manysql.codegen.parse_battery import _REFERENCE_SQL, apply_surface
 from manysql.ir.plan import ColumnSchema, Plan
 from manysql.ir.printer import render_plan
-from manysql.spec.dialect import DialectSpec
+from manysql.spec.dialect import DialectSpec, LimitSyntax
 from manysql.spec.semantics import SemanticConfig
 from manysql.storage import CATALOG, schema_of
+
+
+# Limit syntaxes whose surface form cannot encode an OFFSET. The surface
+# rewriter (`_format_limit_clause`) silently drops the offset for these,
+# so a battery item like `LIMIT 5 OFFSET 10` cannot possibly round-trip
+# back to an offset=10 plan. We skip those items rather than punish the
+# lowering for an impossible reconstruction.
+_OFFSET_CAPABLE_LIMIT_SYNTAXES: frozenset[LimitSyntax] = frozenset(
+    {LimitSyntax.LIMIT_OFFSET, LimitSyntax.OFFSET_FETCH}
+)
+_OFFSET_DEPENDENT_LABELS: frozenset[str] = frozenset({"limit_offset"})
 
 
 Catalog = dict[str, tuple[ColumnSchema, ...]]
@@ -73,8 +84,18 @@ class IREquivalenceReport:
 
 
 def build_ir_battery(spec: DialectSpec) -> list[IRBatteryItem]:
+    """Pair each canonical reference SQL with its surface-rewritten form.
+
+    Battery items that depend on a surface feature the spec's syntax
+    cannot encode (currently: ``OFFSET`` for ``HEAD_N`` / ``SAMPLE_N`` /
+    ``TOP_N``) are skipped so the lowering isn't asked to reconstruct
+    information that was discarded by the rewriter.
+    """
+    skip_labels = _skipped_labels(spec)
     items: list[IRBatteryItem] = []
     for label, ref_sql in _REFERENCE_SQL:
+        if label in skip_labels:
+            continue
         items.append(
             IRBatteryItem(
                 label=label,
@@ -83,6 +104,13 @@ def build_ir_battery(spec: DialectSpec) -> list[IRBatteryItem]:
             )
         )
     return items
+
+
+def _skipped_labels(spec: DialectSpec) -> frozenset[str]:
+    skipped: set[str] = set()
+    if spec.surface.limit_syntax not in _OFFSET_CAPABLE_LIMIT_SYNTAXES:
+        skipped.update(_OFFSET_DEPENDENT_LABELS)
+    return frozenset(skipped)
 
 
 def default_schemas() -> Catalog:

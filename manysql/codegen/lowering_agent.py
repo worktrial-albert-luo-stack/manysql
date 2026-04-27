@@ -23,10 +23,12 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass, field
-from importlib import resources
 from importlib.util import module_from_spec, spec_from_loader
 from types import ModuleType
 from typing import Optional
+
+from lark import Lark
+from lark.exceptions import LarkError
 
 from manysql.codegen.grammar_emit import emit_grammar
 from manysql.codegen.ir_battery import (
@@ -35,7 +37,7 @@ from manysql.codegen.ir_battery import (
     build_ir_battery,
     validate_lowering,
 )
-from manysql.codegen.lowering_emit import emit_lowering
+from manysql.codegen.lowering_emit import emit_lowering, emit_lowering_seed
 from manysql.llm.client import LLMClient, LLMError, NullLLMClient
 from manysql.spec.dialect import DialectSpec
 
@@ -166,7 +168,13 @@ def generate_lowering(
                 report=empty_report,
                 attempts=attempts,
             )
-        text = _read_reference_lowering()
+        # Seed the LLM with a reference lowering that already has every
+        # surface-only patch applied (e.g. _lower_limit specialized for
+        # this spec's LimitSyntax). The structural pieces that triggered
+        # NotImplementedError remain for the model to fix, but it no
+        # longer has to reinvent the limit/offset extraction by reading
+        # tokens that Lark filters out of the tree.
+        text = emit_lowering_seed(spec)
         report = empty_report
         last_good = None
 
@@ -175,6 +183,7 @@ def generate_lowering(
             text = _refine_with_llm(
                 spec=spec,
                 lowering_text=text,
+                grammar_text=grammar,
                 items=items,
                 report=report,
                 llm_client=llm_client,
@@ -237,6 +246,7 @@ def _refine_with_llm(
     *,
     spec: DialectSpec,
     lowering_text: str,
+    grammar_text: str,
     items: list[IRBatteryItem],
     report: IREquivalenceReport,
     llm_client: LLMClient,
@@ -247,6 +257,13 @@ def _refine_with_llm(
     `polish=True` means the IR battery is already passing and the caller is
     forcing an LLM iteration; we tell the model to refine without changing
     the IR plans returned for any battery query.
+
+    For non-polish (fix-mode) calls we additionally render the actual Lark
+    parse tree for each failing item using ``grammar_text``. Lark drops
+    anonymous string terminals (e.g. ``"OFFSET"i``) from the tree by
+    default, so without seeing the tree the model often hallucinates
+    keyword tokens that aren't there at runtime — exactly the failure mode
+    we observed in batch-15's ``sqlite_bigquery_db2`` warn.
     """
     spec_summary = json.dumps(
         {
@@ -263,10 +280,13 @@ def _refine_with_llm(
             + "\n".join(f"  - {item.label}: {item.ref_sql}" for item in items)
         )
     else:
+        trees = _parse_failure_trees(grammar_text, report.divergences)
         failure_block = "\n\n".join(
             f"### {d.label}\n"
             f"reference SQL:\n  {d.ref_sql}\n"
             f"dialect SQL:\n  {d.dialect_sql}\n"
+            f"dialect parse tree (Lark; anonymous keyword terminals are NOT shown "
+            f"because Lark filters them out by default):\n{trees.get(d.label, '  <unavailable>')}\n"
             f"reference plan:\n{d.ref_plan or '<unavailable>'}\n"
             f"dialect plan:\n{d.dialect_plan or '<unavailable>'}\n"
             f"error:\n  {d.error}"
@@ -290,10 +310,30 @@ def _refine_with_llm(
     return _strip_code_fences(response.text)
 
 
-def _read_reference_lowering() -> str:
-    return resources.read_text(
-        "manysql.dialects._reference", "lowering.py", encoding="utf-8"
-    )
+def _parse_failure_trees(
+    grammar_text: str, divergences: list
+) -> dict[str, str]:
+    """Render the dialect parse tree for each failing item.
+
+    Returns a per-label string. Best-effort: if the grammar fails to
+    build, or a particular item won't parse, we return a short error
+    string instead of raising — the prompt is still useful with the rest
+    of the trees, and the agent's existing failure handling will retry.
+    """
+    try:
+        parser = Lark(grammar_text, start="start", parser="earley")
+    except LarkError as exc:
+        return {d.label: f"  <grammar build failed: {exc}>" for d in divergences}
+    out: dict[str, str] = {}
+    for d in divergences:
+        try:
+            tree = parser.parse(d.dialect_sql)
+        except Exception as exc:  # noqa: BLE001 - surface in-prompt
+            out[d.label] = f"  <parse failed: {type(exc).__name__}: {exc}>"
+            continue
+        pretty = tree.pretty()
+        out[d.label] = "\n".join("  " + line for line in pretty.splitlines())
+    return out
 
 
 def _load_module(source: str, fullname: str) -> ModuleType:

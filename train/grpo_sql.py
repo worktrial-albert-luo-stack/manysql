@@ -32,6 +32,21 @@ Task sources (``--generator``)
   downloads the train DB pack (~5GB) on first use; for dev the user
   must download from Google Drive manually (URL in the error message).
 
+* ``synsql`` -- :class:`SynSqlTaskGenerator`: pulls ``--synsql-size``
+  examples from the ``seeklhy/SynSQL-2.5M`` HF dataset (2.54M
+  questions across 16k+ synthetic SQLite databases). Strictly larger
+  and more diverse than BIRD; useful when GRPO ceilings out on BIRD's
+  simple+moderate slice. Critical implementation detail: the corpus
+  ships as one 9.36GB ``data.json`` array, so we never download the
+  whole file -- a custom incremental JSON parser streams the HTTPS
+  body, yields parsed items one at a time, and disconnects as soon
+  as ``--synsql-size`` items pass the ``--synsql-complexity`` filter.
+  A 1k-sample run transfers ~5-10MB instead of 9.36GB. The 55MB
+  ``databases.zip`` is downloaded once and selectively extracted to
+  the referenced ``db_id``s. Cached subsets live under
+  ``~/.cache/manysql/synsql/`` so repeat runs skip the network
+  entirely.
+
 Multi-dialect curricula (``--dialects`` / ``--coverage-mode``)
 --------------------------------------------------------------
 
@@ -163,7 +178,7 @@ class TrainArgs:
     # ---- env / task generator ----
     dialects: list[str] = field(default_factory=lambda: ["aggressive_alien"])
     coverage_mode: str = "partition"  # 'partition' | 'cross_product'
-    generator: str = "golden"  # 'golden' | 'eval_suite' | 'wikisql'
+    generator: str = "golden"  # 'golden' | 'eval_suite' | 'wikisql' | 'bird' | 'synsql'
     eval_suite_limit: int | None = None
     eval_suite_names: list[str] | None = None
     wikisql_size: int = 1000
@@ -182,6 +197,17 @@ class TrainArgs:
     # (500 MB / 200k rows). Set to 0 from the CLI to disable either.
     bird_max_db_bytes: int = 500 * 1024 * 1024
     bird_max_rows_per_table: int = 200_000
+    # SynSQL-2.5M knobs (only used with --generator synsql).
+    # See ``train.env.synsql`` for the full streaming-loader contract.
+    synsql_size: int = 1000
+    synsql_split: str = "train"  # 'train' | 'dev' | 'test'
+    synsql_seed: int = 0
+    synsql_sample_rows: int = 3
+    synsql_complexity: str = "simple,moderate"
+    synsql_start_index: int | None = None
+    synsql_db_dir: str | None = None
+    synsql_no_download: bool = False
+    synsql_max_rows_per_table: int = 200_000
     # ---- rewards ----
     reward_mode: str = "discounted"  # 'linear' | 'discounted'
     discount_factor: float = 0.9
@@ -240,15 +266,18 @@ def parse_args() -> TrainArgs:
     p.add_argument(
         "--generator",
         default=defaults.generator,
-        choices=["golden", "eval_suite", "wikisql", "bird"],
+        choices=["golden", "eval_suite", "wikisql", "bird", "synsql"],
         help=(
             "Task source. golden = cross-dialect translation on the 5-table "
             "manysql catalog; eval_suite = NL->SQL benchmark questions on "
             "github_events; wikisql = NL->SQL on Wikipedia tables from "
             "Salesforce/wikisql; bird = NL->SQL on multi-table real-world "
             "databases from BIRD-SQL (strictly harder than wikisql; "
-            "downloads ~5GB of SQLite DBs on first run). Use --bird-size "
-            "to pick a subset."
+            "downloads ~5GB of SQLite DBs on first run); synsql = "
+            "NL->SQL on synthetic 16k-DB corpus from seeklhy/SynSQL-2.5M "
+            "(2.5M questions; streams just the requested subset over "
+            "HTTPS instead of downloading the full 9.36GB data.json). "
+            "Use --<generator>-size to pick a subset."
         ),
     )
     p.add_argument(
@@ -361,6 +390,90 @@ def parse_args() -> TrainArgs:
             "SQLite mirror so gold-SQL execution and the model see "
             "the same rowset. Default 200,000 keeps memory bounded "
             "on a 32GB box; set to 0 to disable (load full tables)."
+        ),
+    )
+    p.add_argument(
+        "--synsql-size",
+        type=int,
+        default=defaults.synsql_size,
+        help=(
+            "Number of SynSQL-2.5M examples to sample (only used with "
+            "--generator=synsql). Streams just enough of the 9.36GB "
+            "data.json to collect this many items, so larger sizes "
+            "scale roughly linearly in network traffic."
+        ),
+    )
+    p.add_argument(
+        "--synsql-split",
+        default=defaults.synsql_split,
+        choices=["train", "dev", "test"],
+        help=(
+            "SynSQL split. The corpus has no built-in partition; we "
+            "carve mutually-exclusive slices via absolute item index: "
+            "train -> [0, n), dev -> [2_000_000, 2_000_000+n), test "
+            "-> [2_400_000, 2_400_000+n). Override with "
+            "--synsql-start-index for finer control."
+        ),
+    )
+    p.add_argument(
+        "--synsql-seed",
+        type=int,
+        default=defaults.synsql_seed,
+        help="Seed for any in-process shuffling of the SynSQL subset.",
+    )
+    p.add_argument(
+        "--synsql-sample-rows",
+        type=int,
+        default=defaults.synsql_sample_rows,
+        help="How many sample rows to embed in each SynSQL user prompt per table.",
+    )
+    p.add_argument(
+        "--synsql-complexity",
+        default=defaults.synsql_complexity,
+        help=(
+            "Comma-separated SynSQL sql_complexity levels to include "
+            "(simple, moderate, complex, 'highly complex'). Default: "
+            "'simple,moderate'. Use 'highly complex' (with the space, "
+            "quoted) to include the hardest tier."
+        ),
+    )
+    p.add_argument(
+        "--synsql-start-index",
+        type=int,
+        default=defaults.synsql_start_index,
+        help=(
+            "Skip the first K items of data.json before applying the "
+            "complexity filter. Overrides the per-split default; useful "
+            "if you need a non-overlapping sub-slice for ablations."
+        ),
+    )
+    p.add_argument(
+        "--synsql-db-dir",
+        default=defaults.synsql_db_dir,
+        help=(
+            "Path to a directory containing SynSQL <db_id>/<db_id>.sqlite "
+            "files. Overrides the auto-download cache. Useful if you've "
+            "already extracted databases.zip elsewhere."
+        ),
+    )
+    p.add_argument(
+        "--synsql-no-download",
+        action="store_true",
+        help=(
+            "Disable SynSQL auto-download. Combined with --synsql-db-dir, "
+            "lets a CI / sandboxed run fail loudly instead of trying to "
+            "fetch databases.zip."
+        ),
+    )
+    p.add_argument(
+        "--synsql-max-rows-per-table",
+        type=int,
+        default=defaults.synsql_max_rows_per_table,
+        help=(
+            "Cap each SynSQL table to this many rows when materializing "
+            "into Polars (same row-cap mechanism as --bird-max-rows-per-"
+            "table). SynSQL DBs are typically tiny so this rarely "
+            "triggers; set to 0 to disable."
         ),
     )
     p.add_argument(
@@ -494,6 +607,29 @@ def build_runtimes_and_tasks(
                 auto_download=not args.bird_no_download,
                 max_db_bytes=args.bird_max_db_bytes,
                 max_rows_per_table=args.bird_max_rows_per_table,
+            )
+        )
+    elif args.generator == "synsql":
+        from train.env.synsql import (  # noqa: PLC0415
+            SynSqlTaskConfig,
+            SynSqlTaskGenerator,
+        )
+
+        complexities = tuple(
+            c.strip() for c in args.synsql_complexity.split(",") if c.strip()
+        )
+        gen = SynSqlTaskGenerator(
+            SynSqlTaskConfig(
+                target_dialect=base_dialect,
+                n_samples=args.synsql_size,
+                split=args.synsql_split,
+                seed=args.synsql_seed,
+                sample_rows=args.synsql_sample_rows,
+                complexities=complexities,
+                start_index=args.synsql_start_index,
+                db_dir=args.synsql_db_dir,
+                auto_download=not args.synsql_no_download,
+                max_rows_per_table=args.synsql_max_rows_per_table,
             )
         )
     else:  # pragma: no cover - argparse choices guard this

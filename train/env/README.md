@@ -61,12 +61,16 @@ from train.env import (
     # catalogs
     CatalogProvider, GoldenCatalog, GithubEventsCatalog,
     WikiSqlCatalog, WikiSqlEntry,
+    BirdCatalog, BirdEntry, BirdTableInfo,
+    SynSqlCatalog, SynSqlEntry, SynSqlTableInfo,
     # runtime
     DialectRuntime,
     # tasks
     GoldenTaskGenerator, GoldenTaskConfig,
     EvalSuiteTaskGenerator, EvalSuiteTaskConfig,
     WikiSqlTaskGenerator, WikiSqlTaskConfig,
+    BirdTaskGenerator, BirdTaskConfig,
+    SynSqlTaskGenerator, SynSqlTaskConfig,
     # env + rewards
     SqlEnv, InitialObservation,
     RewardConfig, RewardBreakdown, compute_reward,
@@ -117,6 +121,7 @@ python -m train.env --dialect aggressive_alien --generator golden --policy gold 
 | `EvalSuiteTaskGenerator` | NL question from `eval.dataset.questions` | SQLite running the question's reference SQL on `github_events` | End-to-end NL→SQL benchmarking against a synthetic dialect. |
 | `WikiSqlTaskGenerator` | NL question from `Salesforce/wikisql` + per-task table schema | reference dialect runtime on a `WikiSqlCatalog` of N sampled tables | NL→SQL on real Wikipedia tables with diverse schemas; large-scale variety. |
 | `BirdTaskGenerator` | NL question + evidence + multi-table real-DB schema from `birdsql/bird23-train-filtered` (or `bird_sql_dev_20251106`) | stdlib `sqlite3` running the gold SQL against the source `.sqlite` file | NL→SQL on real Kaggle-style multi-table schemas. Strictly harder than WikiSQL (joins, subqueries, CTEs, evidence-style domain hints). Use when WikiSQL ceilings out for your model size. |
+| `SynSqlTaskGenerator` | NL question + (optional external_knowledge) + multi-table synthetic-DB schema from `seeklhy/SynSQL-2.5M` | stdlib `sqlite3` running the gold SQL against the source `.sqlite` file | NL→SQL on the OmniSQL synthetic corpus (2.5M questions across 16k+ generated SQLite DBs, with `simple` / `moderate` / `complex` / `highly complex` complexity bands). Strictly larger and more diverse than BIRD. Streams just the requested subset over HTTPS instead of downloading the full 9.36GB `data.json`. |
 
 All subclass `TaskGenerator(ABC)`; rolling your own (e.g. for a Spider-style
 multi-table benchmark or a synthesized augmentation pipeline) means
@@ -243,6 +248,87 @@ few sample rows. The system-prompt schema slot stays a thin
 placeholder pointing at the user message (the same pattern WikiSQL
 uses) -- jamming all 70+ DBs into the system prompt would blow
 context for no benefit.
+
+### SynSQL-2.5M specifics
+
+SynSQL-2.5M ([Li et al. 2025](https://arxiv.org/abs/2503.02240)) is
+the first million-scale text-to-SQL corpus: 2,544,390 synthetic
+`(question, sql, db_id, cot)` quads over 16,583 synthetic SQLite
+databases, with SQL complexity bands (`simple` / `moderate` /
+`complex` / `highly complex`) and a wide spread of NL question
+styles (`formal`, `conversational`, `vague`, `metaphorical`, ...).
+Strictly larger and more diverse than BIRD; useful when GRPO on a
+3-7B-parameter model ceilings out on BIRD's simple+moderate slice.
+
+The dataset's wire shape is the only real loading challenge:
+`data.json` is a single 9.36GB JSON array. Downloading the full
+file just to grab a few thousand training examples would burn
+bandwidth and OOM small boxes, and the HF `datasets` library can't
+stream this shape reliably (it tries to pre-convert to parquet and
+the conversion service times out on this size). So `SynSqlCatalog`
+ships its own loader:
+
+1. Open an HTTPS streaming connection to the HF resolve URL.
+2. Walk the JSON array item-by-item with a small chunk-based
+   incremental parser (see `iter_json_array_items`) that tracks
+   brace depth + string state to identify item boundaries, so it
+   only invokes `json.loads` on complete top-level items.
+3. Skip the first `start_index` items (split offset), then collect
+   items that pass the `complexities` filter, stopping after
+   `n_samples`. Close the connection.
+4. Cache the parsed slice as JSONL at
+   `~/.cache/manysql/synsql/samples_<split>_seed<seed>_n<N>_skip<K>_cx_<...>.jsonl`
+   so subsequent runs with the same parameters skip the network.
+
+For `--synsql-size 1000` with no skip this transfers ~5-10 MB
+instead of the full 9.36 GB. Larger sizes / large `start_index`
+values scale roughly linearly in bytes streamed.
+
+`databases.zip` is small (54.5 MB) and downloads in one shot. We
+extract it selectively under `~/.cache/manysql/synsql/databases/`
+(only the DBs referenced by the sampled questions) to avoid wasting
+inode space on the other ~16k. The zip is removed after extraction
+unless `$SYNSQL_KEEP_ZIP=1`.
+
+#### Train / dev / test split convention
+
+SynSQL ships as one shuffled corpus with no built-in partition. We
+define mutually-exclusive slices via absolute item index:
+
+| `--synsql-split` | default `start_index` | items |
+|---|---|---|
+| `train` | 0 | head of the array |
+| `dev`   | 2,000,000 | last ~544k items |
+| `test`  | 2,400,000 | last ~144k items |
+
+Pass `--synsql-start-index N` to override. The defaults are designed
+so train and dev never overlap regardless of `--synsql-size`. There
+is no "official" SynSQL eval split (the corpus was published as
+training data); for benchmark comparability against published
+numbers, evaluate on BIRD or Spider instead -- the SynSQL `dev`
+slice is for in-corpus held-out validation only.
+
+```python
+from train.env import (
+    DialectRuntime, SynSqlCatalog, SynSqlTaskGenerator, SynSqlTaskConfig,
+)
+
+cat = SynSqlCatalog(
+    n_samples=2000,
+    split="train",
+    seed=0,
+    complexities=("simple", "moderate"),  # or include 'complex' / 'highly complex'
+)
+gen = SynSqlTaskGenerator(
+    SynSqlTaskConfig(target_dialect="aggressive_alien", catalog=cat)
+)
+gen.build()
+tasks = gen.all_tasks()  # list[SqlTask]
+```
+
+Same row-cap safety knob as BIRD (`--synsql-max-rows-per-table`,
+default 200k) is wired in but rarely triggers -- SynSQL DBs are
+typically tiny (<<1MB).
 
 ## Multi-dialect curricula
 
@@ -466,6 +552,11 @@ python -m train.grpo_sql \
     --generator wikisql --wikisql-size 32 \
     --dialects aggressive_alien,tsql_ish \
     --coverage-mode partition --dry-run
+
+# SynSQL-2.5M, simple+moderate slice (streams ~5MB on first run, then cached).
+python -m train.grpo_sql \
+    --generator synsql --synsql-size 32 \
+    --dialects aggressive_alien --dry-run
 
 # GPU box: see train/grpo_sql.py docstring for the full uv install incantation.
 python train/grpo_sql.py --dialects aggressive_alien --max-steps 200

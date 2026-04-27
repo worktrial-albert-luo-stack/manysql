@@ -39,6 +39,15 @@ Public surface, in roughly the order callers reach for things:
        (5-25 tables per DB) plus an "evidence" field carrying domain
        semantics. See :mod:`train.env.bird`.
 
+* :class:`SynSqlCatalog`, :class:`SynSqlTaskGenerator`,
+  :class:`SynSqlTaskConfig`, :class:`SynSqlEntry`,
+  :class:`SynSqlTableInfo`
+    -- SynSQL-2.5M prompt / synthetic-DB / answer triples as RL tasks.
+       2.5M questions across 16k+ synthetic SQLite DBs; streaming
+       loader pulls only the requested subset over HTTPS instead of
+       downloading the full 9.36GB ``data.json``. See
+       :mod:`train.env.synsql`.
+
 Importing this module loads only stub deps (dataclasses, typing); the
 heavy work (Lark, polars, the dialect package, ``datasets`` for
 WikiSQL/BIRD, stdlib ``sqlite3`` for BIRD database files) happens
@@ -93,6 +102,13 @@ from train.env.bird import (
     BirdTaskConfig,
     BirdTaskGenerator,
 )
+from train.env.synsql import (
+    SynSqlCatalog,
+    SynSqlEntry,
+    SynSqlTableInfo,
+    SynSqlTaskConfig,
+    SynSqlTaskGenerator,
+)
 from train.env.types import EpisodeResult, StepResult, TaskMeta, Turn
 from train.env.wikisql import (
     WikiSqlCatalog,
@@ -131,6 +147,11 @@ __all__ = [
     "SqlEnv",
     "SqlTask",
     "StepResult",
+    "SynSqlCatalog",
+    "SynSqlEntry",
+    "SynSqlTableInfo",
+    "SynSqlTaskConfig",
+    "SynSqlTaskGenerator",
     "TaskGenerator",
     "TaskMeta",
     "Turn",

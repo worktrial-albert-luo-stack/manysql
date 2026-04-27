@@ -4,18 +4,54 @@ The original tinybirdco prompt is heavy on ClickHouse / Tinybird specifics
 (QUALIFY, AggregateFunction, Tornado templating, multi-node pipes, ...).
 Here we render a leaner, dialect-aware version: the executor reports its
 schema and dialect label, and we splice them into a stable shell.
+
+Two prompt modes are supported:
+
+* ``plain`` (default) -- model returns the bare SQL with no markdown / no
+  tags. Best for closed-source frontier models (GPT-4o, Claude, etc.)
+  that follow instructions out of the box.
+* ``tag`` -- model wraps the SQL between ``<SQL>`` and ``</SQL>``. This
+  is what ``train/grpo_sql.py`` trains for (see
+  ``train.env.trl.TRL_TAG_BASE_RULES``); use this mode when evaluating
+  any LoRA produced by that training pipeline, otherwise the trained
+  model emits the tags anyway and the executor chokes on the raw
+  ``<SQL>...`` text. ``extract_sql`` is tag-aware regardless of mode,
+  so a trained model that auto-emits tags is still scored correctly
+  if ``plain`` is forced -- the mode mostly affects whether the system
+  prompt *contradicts* what the model learned.
 """
 
 from __future__ import annotations
 
+import re
 from textwrap import dedent
+from typing import Literal
 
 from eval.executors.base import SqlExecutor
 
-_BASE_RULES = """\
+PromptMode = Literal["plain", "tag"]
+
+# Recognized SQL tag for trained-LoRA-style outputs; matches
+# ``train.env.trl._SQL_TAG_RE`` so eval and reward extraction agree.
+_SQL_TAG_RE = re.compile(r"<\s*SQL\s*>(.*?)<\s*/\s*SQL\s*>", re.DOTALL | re.IGNORECASE)
+
+_BASE_RULES_PLAIN = """\
 - You will be given a question about the data in the database, and a schema.
 - Return ONLY the SQL query, with no markdown, no fences, no commentary.
 - Generate exactly one SELECT statement (or one WITH ... SELECT). No DDL/DML.
+- Add LIMIT to the query when the result could be unbounded; default LIMIT 10.
+- Aliases come AFTER the column expression, e.g. `count(*) AS n`.
+- Reference the table by its bare name, e.g. `FROM github_events`.
+- Use only columns that appear in the schema. Do NOT invent columns.
+"""
+
+# Mirrors train.env.trl.TRL_TAG_BASE_RULES so a LoRA trained on that
+# instruction sees a familiar wrapper at eval time.
+_BASE_RULES_TAG = """\
+- You will be given a question about the data in the database, and a schema.
+- Generate exactly one SELECT statement (or one WITH ... SELECT). No DDL/DML.
+- Wrap the final SQL between <SQL> and </SQL> tags. Example:
+    <SQL>SELECT count(*) AS n FROM github_events LIMIT 10</SQL>
 - Add LIMIT to the query when the result could be unbounded; default LIMIT 10.
 - Aliases come AFTER the column expression, e.g. `count(*) AS n`.
 - Reference the table by its bare name, e.g. `FROM github_events`.
@@ -67,8 +103,18 @@ _DIALECT_HINTS: dict[str, str] = {
 }
 
 
-def build_system_prompt(executor: SqlExecutor) -> str:
-    """Compose the system prompt for the given backend."""
+def build_system_prompt(
+    executor: SqlExecutor,
+    *,
+    prompt_mode: PromptMode = "plain",
+) -> str:
+    """Compose the system prompt for the given backend.
+
+    ``prompt_mode='tag'`` switches the output-format instructions to
+    request ``<SQL>...</SQL>`` wrapping (matching what
+    ``train/grpo_sql.py`` trains on). The dialect-specific hints and
+    schema block are unchanged across modes.
+    """
     dialect = executor.dialect_label().lower()
     hint_key = next(
         (k for k in _DIALECT_HINTS if k in dialect),
@@ -76,11 +122,13 @@ def build_system_prompt(executor: SqlExecutor) -> str:
     )
     hint = _DIALECT_HINTS.get(hint_key or "", "")
 
+    rules = _BASE_RULES_TAG if prompt_mode == "tag" else _BASE_RULES_PLAIN
+
     return dedent(
         f"""\
         You are a careful SQL author. Write a SQL query that answers the user's question.
 
-        {_BASE_RULES.rstrip()}
+        {rules.rstrip()}
         {hint.rstrip()}
 
         Schema:
@@ -90,10 +138,35 @@ def build_system_prompt(executor: SqlExecutor) -> str:
 
 
 def extract_sql(text: str) -> str:
-    """Strip code fences and trailing semicolons that LLMs occasionally emit."""
+    """Pull the SQL out of an LLM response.
+
+    Order of preference:
+
+    1. ``<SQL>...</SQL>`` tag -- matches what ``train/grpo_sql.py`` trains
+       LoRAs to emit. We accept the last tag in the response (so a model
+       that thinks-out-loud and then emits the final query in a tag is
+       handled correctly), case-insensitive.
+    2. Markdown code fence (``\\`\\`\\`sql\\n...\\n\\`\\`\\``) -- frontier
+       models sometimes wrap output in fences despite the prompt.
+    3. Bare text -- fall through to a strip + semicolon trim.
+
+    The tag-aware path runs *regardless* of which prompt mode was used,
+    so a tag-trained LoRA still works even when run with the plain
+    prompt (the model emits tags from training; we strip them here).
+    """
+    if not text:
+        return ""
+
+    # 1. <SQL>...</SQL> wins outright when present. We take the last
+    # match because some models emit a draft inside a thinking block
+    # before the final answer.
+    matches = _SQL_TAG_RE.findall(text)
+    if matches:
+        return matches[-1].strip().rstrip(";").strip()
+
+    # 2/3. Strip code fences then trailing semicolons.
     s = text.strip()
     if s.startswith("```"):
-        # remove opening fence (optionally with language)
         first_newline = s.find("\n")
         if first_newline != -1:
             s = s[first_newline + 1 :]
@@ -102,4 +175,4 @@ def extract_sql(text: str) -> str:
     return s.strip().rstrip(";").strip()
 
 
-__all__ = ["build_system_prompt", "extract_sql"]
+__all__ = ["PromptMode", "build_system_prompt", "extract_sql"]

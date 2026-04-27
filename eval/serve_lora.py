@@ -45,6 +45,15 @@ invocation so any flag the eval CLI accepts still works::
     python -m eval.serve_lora --lora-path ... --dialects a,b -- \\
         --temperature 0.2 --max-tokens 4096
 
+Prompt format
+-------------
+
+This wrapper defaults each eval run to ``--prompt-mode tag`` (the
+``<SQL>...</SQL>`` protocol that ``train/grpo_sql.py`` trains on).
+Override with ``--prompt-mode plain`` if you're benching a model
+that was *not* trained on the tag protocol (or set ``prompt_mode``
+per-entry in a ``--runs`` JSON file).
+
 Server lifecycle
 ----------------
 
@@ -259,6 +268,7 @@ def run_one_eval(
     model_id: str,
     config: RunConfig,
     passthrough: list[str],
+    default_prompt_mode: str | None = None,
 ) -> int:
     """Run ``eval.__main__.main`` once with the given config.
 
@@ -269,8 +279,24 @@ def run_one_eval(
     ``model_id`` is what we send as ``--model`` to eval; it's the LoRA
     module name when serving an adapter, or the base model id when
     running the base model bare.
+
+    ``default_prompt_mode`` is folded into the config's overrides only
+    if neither the config nor the trailing passthrough already
+    specifies ``--prompt-mode``. This lets per-run JSON entries or
+    trailing args win without forcing the caller to repeat the
+    default everywhere.
     """
     from eval.__main__ import main as eval_main  # noqa: PLC0415
+
+    if (
+        default_prompt_mode is not None
+        and "prompt_mode" not in config.overrides
+        and "--prompt-mode" not in passthrough
+    ):
+        config = RunConfig(
+            overrides={**config.overrides, "prompt_mode": default_prompt_mode},
+            label=config.label,
+        )
 
     argv = [
         "--provider",
@@ -499,6 +525,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     p.add_argument(
+        "--prompt-mode",
+        choices=["plain", "tag"],
+        default="tag",
+        help=(
+            "System-prompt format passed to each eval run. Defaults to 'tag' "
+            "because this wrapper's primary use case is evaluating LoRAs "
+            "from train/grpo_sql.py, which trains the model to emit "
+            "<SQL>...</SQL>. Use 'plain' if you're benchmarking a base "
+            "model that wasn't trained on the tag protocol. Per-run "
+            "entries in --runs JSON can override this with their own "
+            "'prompt_mode' key."
+        ),
+    )
+
+    p.add_argument(
         "--continue-on-error",
         action="store_true",
         help="If one eval run fails, log it and proceed to the next run.",
@@ -637,6 +678,7 @@ def main(argv: list[str] | None = None) -> int:
                     model_id=model_id,
                     config=rc,
                     passthrough=passthrough,
+                    default_prompt_mode=args.prompt_mode,
                 )
             except Exception as exc:  # noqa: BLE001 - we want to keep going
                 print(

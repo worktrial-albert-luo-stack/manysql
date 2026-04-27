@@ -32,7 +32,7 @@ from rich.progress import (
 from eval.dataset.questions import Question, select
 from eval.executors.base import ExecResult, SqlExecutor
 from eval.llm import LLMClient
-from eval.prompt import build_system_prompt, extract_sql
+from eval.prompt import PromptMode, build_system_prompt, extract_sql
 from eval.validator import ComparisonResult, compare_results
 
 DEFAULT_MAX_RETRIES = 2
@@ -113,6 +113,7 @@ def run_benchmark(
     reference_executor: SqlExecutor | None = None,
     output_path: str | Path | None = None,
     quiet: bool = False,
+    prompt_mode: PromptMode = "plain",
 ) -> BenchmarkRun:
     """Run the suite. Returns a `BenchmarkRun` and optionally writes JSON.
 
@@ -157,7 +158,7 @@ def run_benchmark(
     executor.setup()
     if reference_executor is not None and reference_executor is not executor:
         reference_executor.setup()
-    system_prompt = build_system_prompt(executor)
+    system_prompt = build_system_prompt(executor, prompt_mode=prompt_mode)
 
     progress_cm: Any
     if quiet:

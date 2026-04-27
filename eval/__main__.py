@@ -170,6 +170,22 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to write JSON results. Default: results/<provider>_<model>.json",
     )
     p.add_argument(
+        "--prompt-mode",
+        choices=["plain", "tag"],
+        default="plain",
+        help=(
+            "System-prompt format. 'plain' (default) asks for bare SQL "
+            "with no markdown -- best for closed-source frontier models. "
+            "'tag' asks the model to wrap output between <SQL>...</SQL> "
+            "and matches what train/grpo_sql.py trains LoRAs on; use it "
+            "when evaluating any LoRA produced by that pipeline. The "
+            "extractor handles tags in either mode, so a tag-trained "
+            "model run with --prompt-mode plain is still scored "
+            "correctly -- the mode mostly affects whether the prompt "
+            "*contradicts* what the model learned."
+        ),
+    )
+    p.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress progress and per-question output.",
@@ -266,6 +282,7 @@ def main(argv: list[str] | None = None) -> int:
             concurrency=args.concurrency,
             output_path=output,
             quiet=args.quiet,
+            prompt_mode=args.prompt_mode,
         )
     return 0
 

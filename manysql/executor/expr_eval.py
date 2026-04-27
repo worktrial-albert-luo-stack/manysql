@@ -40,7 +40,6 @@ from manysql.ir.expr import (
 )
 from manysql.ir.types import IRType, TypeKind
 from manysql.spec.semantics import (
-    BoolTruthiness,
     DivByZero,
     IntDivision,
     SemanticConfig,
@@ -108,12 +107,13 @@ def _trunc_div_pl(n: pl.Expr, d: int) -> pl.Expr:
 def _to_bool(e: pl.Expr, semantics: SemanticConfig) -> pl.Expr:
     """Coerce an expression to boolean according to the truthiness knob.
 
-    STRICT: must already be Bool; we just cast (Polars will error on incompatible).
-    C_STYLE: 0 -> false, nonzero -> true; '' -> false, nonempty -> true.
+    Both STRICT and C_STYLE currently lower to the same Polars cast: the
+    non-strict variant accepts numerics (0 -> False, nonzero -> True) and
+    propagates NULLs unchanged, which is what both modes want for v1. The
+    ``semantics`` argument is kept so the callsite stays stable when a real
+    STRICT path (raise on non-bool input dtype) gets re-introduced.
     """
-    if semantics.boolean_truthiness == BoolTruthiness.C_STYLE:
-        # Best-effort: works for numeric and string types Polars can introspect.
-        return e.cast(pl.Boolean, strict=False)
+    _ = semantics
     return e.cast(pl.Boolean, strict=False)
 
 
@@ -581,9 +581,17 @@ class ExprEvaluator:
 
     def _inlist(self, e: InList) -> pl.Expr:
         operand = self._dispatch(e.operand)
-        # Build OR chain (Polars `is_in` would lose type alignment for nulls).
         if not e.items:
             return pl.lit(False)
+        # Fast path: when every item is a non-NULL literal, dispatch to
+        # Polars' `is_in` (~10x faster than the OR chain for long lists).
+        # Bail out if any item is NULL or non-literal: SQL's three-valued
+        # IN semantics with a NULL-containing list (`x IN (a, NULL)` is
+        # NULL when x != a, not False) is what the OR chain preserves.
+        if all(
+            isinstance(it, Literal) and it.value is not None for it in e.items
+        ):
+            return operand.is_in([it.value for it in e.items])
         out = operand == self._dispatch(e.items[0])
         for it in e.items[1:]:
             out = out | (operand == self._dispatch(it))

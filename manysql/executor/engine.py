@@ -23,10 +23,12 @@ from manysql.executor.expr_eval import (
 from manysql.ir.expr import (
     AggCall,
     AggKind,
+    BinaryOp,
     ColumnRef,
     Expr,
     Literal,
     NullsOrder,
+    Op,
     OrderKey,
     SortDirection,
     WindowCall,
@@ -190,11 +192,35 @@ class PlanExecutor:
         if p.on is None:
             raise ValueError(f"{p.kind} JOIN requires ON or USING")
 
-        # ON-style join: tag both sides with row indices, cross-join,
-        # evaluate the predicate, then fill unmatched rows by index lookup.
-        # Using indices avoids Polars' NULL-aware-equality semantics (NULL=NULL
-        # is *not* a match in equi-join), which would otherwise misclassify
-        # left rows containing NULLs as unmatched after re-joining.
+        # Fast path: if `on` is a conjunction of qualified column-equalities
+        # split cleanly across the two sides, dispatch to Polars' hash join.
+        # Polars' equi-join semantics for NULL keys (NULL never matches NULL)
+        # match the cross+filter path's NULL handling, so this is observably
+        # equivalent. `coalesce=False` keeps both key columns in the output
+        # so downstream column resolution sees the same schema either way.
+        equi = _equi_keys(p.on, p.left.schema(), p.right.schema())
+        if equi is not None:
+            left_on, right_on = equi
+            how = {
+                JoinKind.INNER: "inner",
+                JoinKind.LEFT: "left",
+                JoinKind.RIGHT: "right",
+                JoinKind.FULL: "full",
+                JoinKind.SEMI: "semi",
+                JoinKind.ANTI: "anti",
+            }[p.kind]
+            return left.join(
+                right,
+                left_on=left_on,
+                right_on=right_on,
+                how=how,
+                coalesce=False,
+            )
+
+        # Generic-predicate fallback: tag both sides with row indices,
+        # cross-join, evaluate the predicate, then fill unmatched rows by
+        # index lookup. Quadratic in row counts but handles arbitrary
+        # boolean expressions (functions, ORs, comparisons, etc).
         if p.kind in (JoinKind.SEMI, JoinKind.ANTI):
             return self._semi_anti_join(left, right, p, outer_row)
 
@@ -241,7 +267,9 @@ class PlanExecutor:
         outer_row: dict[str, Any],
     ) -> pl.DataFrame:
         # Tag left rows with index, cross with right, evaluate predicate, then
-        # filter left by membership.
+        # filter left by membership. Reached only when `on` isn't a clean
+        # equi-conjunction; the equi-key fast path in `_join` already handled
+        # the common case via Polars' native semi/anti join.
         left_idx = left.with_row_index("__manysql_left_idx")
         cross = left_idx.join(right, how="cross")
         ev = self.evaluator(outer_row)
@@ -515,7 +543,11 @@ class PlanExecutor:
         return inp
 
     def _distinct(self, p: Distinct, outer_row: dict[str, Any]) -> pl.DataFrame:
-        return self._dispatch(p.input, outer_row).unique(maintain_order=True)
+        # SQL DISTINCT has no defined output order; downstream consumers
+        # canonicalize by sorted-tuple-of-values (eval/validator) or run the
+        # property oracle on a re-deduplicated frame. `maintain_order=False`
+        # uses Polars' hash dedup (~2x faster than the stable variant).
+        return self._dispatch(p.input, outer_row).unique(maintain_order=False)
 
     def _setop(self, p: SetOp, outer_row: dict[str, Any]) -> pl.DataFrame:
         left = self._dispatch(p.left, outer_row)
@@ -534,17 +566,19 @@ class PlanExecutor:
         if not all_mode and self.semantics.set_op_default == SetOpDefault.ALL:
             all_mode = True
 
+        # Set-op dedup output is order-undefined per SQL; same rationale as
+        # `_distinct` above for `maintain_order=False`.
         if p.kind == SetOpKind.UNION:
             combined = pl.concat([left, right], how="vertical_relaxed")
-            return combined if all_mode else combined.unique(maintain_order=True)
+            return combined if all_mode else combined.unique(maintain_order=False)
         if p.kind == SetOpKind.INTERSECT:
             cols = list(left.columns)
             inter = left.join(right, on=cols, how="semi")
-            return inter if all_mode else inter.unique(maintain_order=True)
+            return inter if all_mode else inter.unique(maintain_order=False)
         if p.kind == SetOpKind.EXCEPT:
             cols = list(left.columns)
             diff = left.join(right, on=cols, how="anti")
-            return diff if all_mode else diff.unique(maintain_order=True)
+            return diff if all_mode else diff.unique(maintain_order=False)
         raise NotImplementedError(p.kind)
 
     def _with_cte(self, p: WithCTE, outer_row: dict[str, Any]) -> pl.DataFrame:
@@ -680,6 +714,68 @@ def execute(
         passes=passes,
         effects=effects,
     ).execute(plan)
+
+
+def _equi_keys(
+    on: Expr,
+    left_schema: tuple,
+    right_schema: tuple,
+) -> Optional[tuple[list[str], list[str]]]:
+    """Detect a conjunction-of-column-equalities ON clause for the hash-join fast path.
+
+    Returns ``(left_on, right_on)`` Polars column names if ``on`` is a flat AND
+    of ``BinaryOp(EQ, ColumnRef(L), ColumnRef(R))`` where each equality has one
+    qualified column resolving to ``left_schema``'s qualifiers and the other
+    resolving to ``right_schema``'s. Returns ``None`` for everything else
+    (function calls, comparisons other than ``=``, mixed-side terms, OR, or
+    same-side equalities), so the caller falls back to cross+filter.
+
+    Names are constructed using the ``{qualifier}__{name}`` convention applied
+    by :meth:`PlanExecutor._scan` when a Scan has an alias. We require both
+    sides of every equality to be qualified, since unqualified columns can't
+    be safely attributed to either side.
+    """
+    left_quals: set[str] = {
+        c.qualifier for c in left_schema if c.qualifier is not None
+    }
+    right_quals: set[str] = {
+        c.qualifier for c in right_schema if c.qualifier is not None
+    }
+    if not left_quals or not right_quals:
+        return None
+
+    eqs: list[tuple[str, str]] = []
+    stack: list[Expr] = [on]
+    while stack:
+        e = stack.pop()
+        if isinstance(e, BinaryOp) and e.op == Op.AND:
+            stack.append(e.left)
+            stack.append(e.right)
+            continue
+        if not (
+            isinstance(e, BinaryOp)
+            and e.op == Op.EQ
+            and isinstance(e.left, ColumnRef)
+            and isinstance(e.right, ColumnRef)
+            and e.left.qualifier is not None
+            and e.right.qualifier is not None
+        ):
+            return None
+        l_ref, r_ref = e.left, e.right
+        if l_ref.qualifier in left_quals and r_ref.qualifier in right_quals:
+            eqs.append(
+                (f"{l_ref.qualifier}__{l_ref.name}", f"{r_ref.qualifier}__{r_ref.name}")
+            )
+        elif l_ref.qualifier in right_quals and r_ref.qualifier in left_quals:
+            eqs.append(
+                (f"{r_ref.qualifier}__{r_ref.name}", f"{l_ref.qualifier}__{l_ref.name}")
+            )
+        else:
+            return None
+
+    if not eqs:
+        return None
+    return [l for l, _ in eqs], [r for _, r in eqs]
 
 
 def apply_pre_passes(

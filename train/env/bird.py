@@ -148,8 +148,15 @@ class BirdTableInfo:
     safe_columns: list[str]   # sanitized identifiers (`c_*`)
     original_columns: list[str]
     types: list[str]          # IR type names (INT, FLOAT, TEXT, BOOL, DATE)
-    sample_rows: list[dict[str, Any]]  # using safe_columns as keys
-    n_rows: int
+    # Original SQLite type declarations (e.g. "DATETIME", "DATE",
+    # "VARCHAR(255)"). Most BIRD DBs declare DATE/DATETIME columns
+    # but SQLite stores them as TEXT under the hood, so the IR-level
+    # ``types`` collapses them to "TEXT". Surfacing the original
+    # affinity in the prompt lets the model know "this TEXT column
+    # actually holds date strings; CAST before EXTRACT/DATE_DIFF".
+    sqlite_types: list[str] = field(default_factory=list)
+    sample_rows: list[dict[str, Any]] = field(default_factory=list)  # using safe_columns as keys
+    n_rows: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +265,10 @@ class BirdCatalog(CatalogProvider):
         # (the long tail of BIRD has 1-5GB DBs that OOM Polars in-mem
         # loading); records the per-DB effective path (sampled mirror
         # if ``max_rows_per_table`` is set).
-        per_db: dict[str, dict[str, tuple[Any, list[str], list[str], list[str]]]] = {}
+        per_db: dict[
+            str,
+            dict[str, tuple[Any, list[str], list[str], list[str], list[str]]],
+        ] = {}
         missing_dbs: set[str] = set()
         oversized_dbs: list[tuple[str, int]] = []
         sampled_dbs: list[tuple[str, int]] = []  # (db_id, max_orig_table_rows)
@@ -348,7 +358,13 @@ class BirdCatalog(CatalogProvider):
         for db_id, table_map in per_db.items():
             per_db_table_info[db_id] = {}
             db_part = safe_table_name(db_id, fallback="db")
-            for tbl_name, (df, safe_cols, orig_cols, types) in table_map.items():
+            for tbl_name, (
+                df,
+                safe_cols,
+                orig_cols,
+                types,
+                sqlite_types,
+            ) in table_map.items():
                 # Build the catalog name from independently-sanitized
                 # parts joined with ``__`` so the separator survives
                 # (a single ``safe_table_name(f"{db}__{t}")`` would
@@ -379,6 +395,7 @@ class BirdCatalog(CatalogProvider):
                     safe_columns=safe_cols,
                     original_columns=orig_cols,
                     types=types,
+                    sqlite_types=list(sqlite_types),
                     sample_rows=sample,
                     n_rows=df.height,
                 )
@@ -574,22 +591,25 @@ def _looks_like_bird_db_dir(path: Path, referenced_db_ids: set[str]) -> bool:
 
 def _load_sqlite_to_polars(
     db_path: Path,
-) -> dict[str, tuple[Any, list[str], list[str], list[str]]]:
+) -> dict[str, tuple[Any, list[str], list[str], list[str], list[str]]]:
     """Load every user table in ``db_path`` into a Polars DataFrame.
 
-    Returns ``{table_name: (df, safe_cols, orig_cols, type_names)}``.
-    Skips ``sqlite_*`` system tables and views.
+    Returns ``{table_name: (df, safe_cols, orig_cols, ir_type_names,
+    sqlite_type_decls)}``. Skips ``sqlite_*`` system tables and views.
 
     Type-mapping: SQLite affinities are mapped to manysql IR type
     names ("INT" / "FLOAT" / "TEXT" / "DATE" / "BOOL"). DATE is
     detected heuristically from column names ending in ``_date`` /
     starting with ``date_`` etc; BIRD doesn't carry a real DATE
     affinity (SQLite stores dates as TEXT). We default to TEXT for
-    anything ambiguous.
+    anything ambiguous. The original SQLite type declaration string
+    is also returned so the per-task prompt can surface "this TEXT
+    column was originally declared DATETIME" -- otherwise the model
+    has no signal that a Utf8 column actually holds date strings.
     """
     import polars as pl  # noqa: PLC0415
 
-    out: dict[str, tuple[Any, list[str], list[str], list[str]]] = {}
+    out: dict[str, tuple[Any, list[str], list[str], list[str], list[str]]] = {}
     conn = sqlite3.connect(str(db_path))
     try:
         cur = conn.cursor()
@@ -647,7 +667,7 @@ def _load_sqlite_to_polars(
                         )
                     )
             df = pl.DataFrame(series) if series else pl.DataFrame()
-            out[tbl] = (df, safe_cols, orig_cols, ir_type_names)
+            out[tbl] = (df, safe_cols, orig_cols, ir_type_names, sqlite_types)
     finally:
         conn.close()
     return out
@@ -1143,7 +1163,20 @@ _BIRD_SCHEMA_PROMPT = (
     "sample rows -- are provided in the user message; reference that "
     "block, not a global schema. Tables are namespaced "
     "``<db_id>__<table>`` so they're unique across the whole training "
-    "corpus."
+    "corpus.\n\n"
+    "DATE/TIME COLUMNS: SQLite stores dates and timestamps as TEXT, "
+    "and the catalog preserves that storage shape -- so any column "
+    "whose original SQLite type was DATE / DATETIME / TIMESTAMP is "
+    "exposed as a TEXT column whose values are ISO-formatted strings "
+    "(``YYYY-MM-DD`` or ``YYYY-MM-DD HH:MM:SS``). The per-table column "
+    "listing tags these with ``(TEXT, was DATETIME)`` etc. so they "
+    "are identifiable. To use ``EXTRACT`` / ``DATE_PART`` / "
+    "``DATE_TRUNC`` / ``DATE_DIFF`` on such a column, CAST it first "
+    "(e.g. ``EXTRACT(YEAR FROM CAST(c_hire_date AS DATE))``); without "
+    "the CAST the engine will reject the call because the underlying "
+    "type is still text. Direct string ordering (``c_hire_date >= "
+    "'2020-01-01'``) works without a CAST because ISO format sorts "
+    "lexicographically."
 )
 
 
@@ -1346,10 +1379,21 @@ def _render_user_prompt(entry: BirdEntry, *, max_value_chars: int = 40) -> str:
             f"{tbl.n_rows} rows)"
         )
         lines.append("    Columns (sanitized <- original; type):")
-        for safe, orig, t in zip(
-            tbl.safe_columns, tbl.original_columns, tbl.types, strict=False
+        # Pad sqlite_types to the column length in case an older
+        # entry was constructed without it.
+        sqlite_types = list(tbl.sqlite_types) + [""] * max(
+            0, len(tbl.safe_columns) - len(tbl.sqlite_types)
+        )
+        for safe, orig, t, src in zip(
+            tbl.safe_columns,
+            tbl.original_columns,
+            tbl.types,
+            sqlite_types,
+            strict=False,
         ):
-            lines.append(f"      {safe}  <-  {orig}  ({t})")
+            lines.append(
+                f"      {safe}  <-  {orig}  ({_format_type_label(t, src)})"
+            )
         if tbl.sample_rows:
             lines.append(f"    Sample rows ({len(tbl.sample_rows)}):")
             cols = tbl.safe_columns
@@ -1372,6 +1416,27 @@ def _render_user_prompt(entry: BirdEntry, *, max_value_chars: int = 40) -> str:
         "evidence field's domain hints when relevant."
     )
     return "\n".join(lines)
+
+
+def _format_type_label(ir_type: str, sqlite_type: str) -> str:
+    """Render the column's IR type, annotating TEXT-stored dates.
+
+    BIRD stores DATE/DATETIME columns as TEXT; surfacing the original
+    affinity tells the model "this Utf8 column actually holds date
+    strings, you'll need to CAST before EXTRACT/DATE_DIFF/etc." Other
+    type collapses (VARCHAR -> TEXT, NUMERIC -> FLOAT) aren't worth
+    annotating because they don't affect query semantics.
+    """
+    if ir_type != "TEXT":
+        return ir_type
+    src = (sqlite_type or "").upper()
+    if not src:
+        return ir_type
+    if "DATE" in src or "TIME" in src:
+        # Trim parenthesized size hints (``DATETIME(3)``) for terseness.
+        clean = re.sub(r"\s*\([^)]*\)\s*", "", src).strip()
+        return f"TEXT, was {clean}"
+    return ir_type
 
 
 def _format_cell(v: Any, *, max_chars: int = 40) -> str:

@@ -13,13 +13,17 @@ Disagreement between oracles is *itself* informative: it usually means the IR
 plan touches a corner case where engines diverge. We surface this as
 NEEDS_REVIEW so the codegen/dataset curator can intervene rather than blindly
 trusting any single oracle.
+
+When `actual` is not supplied, the harness builds it via the Polars executor
+and forwards the dialect's `overrides`, `passes`, and `effects` modules so
+the canonical executor reflects whichever extension lanes the dialect uses.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 import polars as pl
 
@@ -101,10 +105,30 @@ class OracleHarness:
         semantics: SemanticConfig,
         catalog: dict[str, pl.DataFrame],
         actual: Optional[pl.DataFrame] = None,
+        *,
+        overrides: Optional[Any] = None,
+        passes: Optional[Any] = None,
+        effects: Optional[Any] = None,
     ) -> HarnessReport:
-        """If `actual` is not provided, the Polars executor is used as the actual."""
+        """If `actual` is not provided, the Polars executor is used as the actual.
+
+        When the harness materializes `actual` itself, it forwards the
+        dialect's `overrides`, `passes`, and `effects` modules to the
+        executor so dialect-specific function bodies, plan rewrites, and
+        runtime decision-point handlers are honored. The oracles
+        themselves run on the same plan + semantics + catalog and don't
+        receive these modules — they are reference engines, not the
+        system under test.
+        """
         if actual is None:
-            actual = polars_execute(plan, semantics, catalog)
+            actual = polars_execute(
+                plan,
+                semantics,
+                catalog,
+                overrides=overrides,
+                passes=passes,
+                effects=effects,
+            )
 
         property_failures = self._run_property_oracles(
             plan, actual, semantics, catalog

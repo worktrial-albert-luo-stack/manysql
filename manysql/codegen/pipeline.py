@@ -25,9 +25,11 @@ from manysql.codegen.lowering_agent import (
     LoweringAgentResult,
     generate_lowering,
 )
+from manysql.codegen.effects_emit import emit_effects
 from manysql.codegen.lowering_emit import emit_lowering
 from manysql.codegen.metadata_emit import emit_metadata, emit_spec_json
 from manysql.codegen.overrides_emit import emit_overrides
+from manysql.codegen.passes_emit import emit_passes
 from manysql.llm.client import LLMClient
 from manysql.spec.dialect import DialectSpec
 
@@ -43,6 +45,8 @@ class PackageBundle:
     spec_json: str
     init_py: str
     overrides_py: str
+    passes_py: str
+    effects_py: str
     battery_json: str
     examples_sql: str
 
@@ -51,6 +55,8 @@ class PackageBundle:
             "grammar.lark": self.grammar,
             "lowering.py": self.lowering_py,
             "overrides.py": self.overrides_py,
+            "passes.py": self.passes_py,
+            "effects.py": self.effects_py,
             "semantics.json": self.semantics_json,
             "metadata.json": self.metadata_json,
             "spec.json": self.spec_json,
@@ -115,6 +121,8 @@ def build_package_bundle(
         grammar=grammar_result.grammar if grammar_result.ok else emit_grammar(spec),
         lowering_py=lowering_text,
         overrides_py=emit_overrides(spec),
+        passes_py=emit_passes(spec),
+        effects_py=emit_effects(spec),
         semantics_json=emit_semantic_config(spec),
         metadata_json=emit_metadata(
             spec,

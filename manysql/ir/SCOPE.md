@@ -64,10 +64,34 @@ Some "dialect features" are not query-language features at all but properties of
 
 The IR can absorb any one via a Tier-B extension. Each is a different category and the IR will never elegantly capture all of them; we add them when a target dialect requires them.
 
+## Per-dialect extension lanes
+
+The IR is closed (Tier A above), but a generated dialect plugs into the runtime through four extension lanes. Two are closed-world (enum-driven) and two are open-world (per-dialect Python modules):
+
+| Lane | Surface | Where it lives | What it changes |
+|---|---|---|---|
+| `SurfaceSpec` | knobs | `manysql/spec/dialect.py` | Surface tokens (keywords, operators, cast syntax, limit syntax, …). Closed enum set. |
+| `SemanticConfig` | knobs | `manysql/spec/semantics.py` | Runtime semantics whose space is small and known up front (null ordering, divide-by-zero, COUNT-on-empty, …). Closed enum set. |
+| `lowering.py` + `passes.py` | code | `manysql/dialects/<name>/` | `lowering.py` turns a parse tree into IR; `passes.py` exposes `PRE_EXECUTION_PASSES: list[Plan -> Plan]` that desugar non-canonical IR markers into canonical IR before execution. Open-world. |
+| `overrides.py` + `effects.py` | code | `manysql/dialects/<name>/` | `overrides.py` exposes `FUNCTIONS` / `OPERATORS` for canonical-executor-unsupported function or operator bodies; `effects.py` exposes `EFFECTS` — named handlers swapped at fixed executor decision points (e.g. `text_eq` for collation-insensitive comparison). Open-world. |
+
+Decision rule for adding a new dialect feature:
+
+1. **Pure surface** (different keyword, different operator spelling) → `SurfaceSpec` knob.
+2. **Runtime semantic divergence in a small enum** → `SemanticConfig` knob.
+3. **Canonical IR is the right shape** but the dialect's surface produces non-canonical IR → desugar in `passes.py`.
+4. **Canonical IR is the right shape** but the executor's *implementation* of one operation must change for this dialect → `effects.py` handler at a registered decision point.
+5. **Canonical IR cannot represent the feature at all** → Tier-B IR extension via RFC.
+
+The two open lanes (`passes.py`, `effects.py`) are documented in `manysql/ir/rfcs/0002-passes-and-effects.md`.
+
 ## Process
 
 Adding a node, expression, or type to the IR requires a short RFC under `manysql/ir/rfcs/` covering: the surface dialect features it enables, the executor changes required, the verification-oracle plan (which oracle(s) can verify the new feature), and any SemanticConfig knobs introduced.
 
-The first such RFC is `manysql/ir/rfcs/0001-tier3.md` (arrays/structs/maps, JSON, regex flavor + deep date/time), gated for v1.5.
+The IR-extension RFCs to date:
+
+- `manysql/ir/rfcs/0001-tier3.md` — Tier-3 IR extensions for v1.5 (arrays/structs/maps, JSON, regex flavor + deep date/time).
+- `manysql/ir/rfcs/0002-passes-and-effects.md` — `passes.py` and `effects.py` per-dialect extension lanes (no IR addition; documents the runtime contract).
 
 This gate exists because every IR addition is a contract honored by the executor, every oracle, and every generated dialect's lowering. Silent additions break that invariant.

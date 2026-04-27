@@ -3,9 +3,17 @@
 A dialect is a bundle:
     spec.json         (DialectSpec - the input that drove generation)
     grammar.lark      (Lark grammar)
-    lowering.py       (AST -> IR module; must define `lower(tree, config) -> Plan`)
+    lowering.py       (parse-tree -> IR module; must define `lower(tree, config, catalog) -> Plan`)
     semantics.json    (SemanticConfig)
-    overrides.py      (optional: operator overrides)
+    overrides.py      (optional: per-function/operator implementations the
+                       canonical executor doesn't natively support)
+    passes.py         (optional: Plan -> Plan rewrites that run between
+                       lowering and execution; for dialects whose surface
+                       requires non-canonical IR markers that need to be
+                       desugared to canonical IR)
+    effects.py        (optional: named handlers swapped into executor
+                       decision points; for runtime divergences whose
+                       space isn't a small closed enum)
     metadata.json     (model used, prompts, retry log, lifecycle state)
     battery.json      (parse + IR-equivalence battery in dialect surface,
                        plus the latest validation summary)
@@ -109,6 +117,10 @@ class DialectEngine:
 
     The grammar text is loaded but Lark parser construction is deferred to the
     caller (the executor module owns that, so it can choose lalr/earley/etc).
+
+    `overrides`, `passes`, and `effects` are the three optional, per-dialect
+    extension lanes. All three are loaded as Python modules and consulted by
+    the runtime when present; absent ones fall back to canonical behavior.
     """
 
     name: str
@@ -117,6 +129,8 @@ class DialectEngine:
     lowering: ModuleType
     semantics: SemanticConfig
     overrides: Optional[ModuleType] = None
+    passes: Optional[ModuleType] = None
+    effects: Optional[ModuleType] = None
     metadata: GenerationMetadata = field(default_factory=GenerationMetadata)
     lifecycle: Lifecycle = Lifecycle.GENERATED
 
@@ -141,6 +155,8 @@ class DialectRegistry:
             lowering.py
             semantics.json
             overrides.py        (optional)
+            passes.py           (optional)
+            effects.py          (optional)
             metadata.json
             battery.json        (parse + IR battery in dialect surface,
                                  plus the latest validation summary)
@@ -209,6 +225,16 @@ class DialectRegistry:
             overrides_mod = self._load_module(
                 d / "overrides.py", f"manysql._loaded.{name}.overrides"
             )
+        passes_mod = None
+        if (d / "passes.py").exists():
+            passes_mod = self._load_module(
+                d / "passes.py", f"manysql._loaded.{name}.passes"
+            )
+        effects_mod = None
+        if (d / "effects.py").exists():
+            effects_mod = self._load_module(
+                d / "effects.py", f"manysql._loaded.{name}.effects"
+            )
 
         meta_dict = self._read_metadata(name)
         return DialectEngine(
@@ -218,6 +244,8 @@ class DialectRegistry:
             lowering=lowering_mod,
             semantics=semantics,
             overrides=overrides_mod,
+            passes=passes_mod,
+            effects=effects_mod,
             metadata=GenerationMetadata.from_dict(meta_dict.get("generation", {})),
             lifecycle=Lifecycle(meta_dict.get("lifecycle", Lifecycle.GENERATED.value)),
         )
@@ -231,6 +259,8 @@ class DialectRegistry:
         lowering_source: str,
         semantics: SemanticConfig,
         overrides_source: Optional[str] = None,
+        passes_source: Optional[str] = None,
+        effects_source: Optional[str] = None,
         generation: Optional[GenerationMetadata] = None,
         lifecycle: Lifecycle = Lifecycle.GENERATED,
     ) -> Path:
@@ -247,6 +277,10 @@ class DialectRegistry:
         )
         if overrides_source is not None:
             (d / "overrides.py").write_text(overrides_source)
+        if passes_source is not None:
+            (d / "passes.py").write_text(passes_source)
+        if effects_source is not None:
+            (d / "effects.py").write_text(effects_source)
 
         gen = generation or GenerationMetadata()
         gen.updated_at = datetime.now(timezone.utc).isoformat()

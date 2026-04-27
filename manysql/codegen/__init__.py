@@ -23,6 +23,7 @@ dialect. This lets us:
 
 from manysql.codegen.battery_emit import emit_battery_json, emit_examples_sql
 from manysql.codegen.config_emit import emit_semantic_config
+from manysql.codegen.effects_emit import emit_effects
 from manysql.codegen.grammar_agent import (
     GrammarAgentResult,
     GrammarAttempt,
@@ -44,7 +45,12 @@ from manysql.codegen.lowering_agent import (
 from manysql.codegen.lowering_emit import emit_lowering
 from manysql.codegen.metadata_emit import emit_metadata, emit_spec_json
 from manysql.codegen.overrides_emit import emit_overrides
-from manysql.codegen.overrides_loader import OverrideImportError, load_overrides
+from manysql.codegen.overrides_loader import (
+    OverrideImportError,
+    load_overrides,
+    load_sandboxed_module,
+)
+from manysql.codegen.passes_emit import emit_passes
 from manysql.codegen.parse_battery import (
     BatteryFailure,
     BatteryItem,
@@ -79,16 +85,19 @@ __all__ = [
     "build_package_bundle",
     "build_parse_battery",
     "emit_battery_json",
+    "emit_effects",
     "emit_examples_sql",
     "emit_grammar",
     "emit_lowering",
     "emit_metadata",
     "emit_overrides",
+    "emit_passes",
     "emit_semantic_config",
     "emit_spec_json",
     "generate_grammar",
     "generate_lowering",
     "load_overrides",
+    "load_sandboxed_module",
     "validate_grammar",
     "validate_lowering",
     "write_dialect_package",

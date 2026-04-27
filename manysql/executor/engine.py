@@ -61,10 +61,18 @@ from manysql.spec.semantics import (
 class PlanExecutor:
     """Execute an IR plan over an in-memory table catalog.
 
-    `overrides` is an optional object (typically the `overrides` module of
-    a generated dialect) exposing `FUNCTIONS` / `OPERATORS` dicts. The
-    expression evaluator consults them before raising `NotImplementedError`
-    for an unrecognized function or operator.
+    A dialect plugs into the executor through three optional modules:
+
+    - ``overrides``: object exposing ``FUNCTIONS`` / ``OPERATORS`` dicts
+      consulted by the expression evaluator before it raises
+      ``NotImplementedError`` for an unrecognized function/operator.
+    - ``passes``: object exposing ``PRE_EXECUTION_PASSES`` — a list of
+      ``Plan -> Plan`` rewrites applied between lowering and dispatch,
+      in list order. Lets a dialect desugar non-canonical IR markers
+      (emitted by its own ``lowering.py``) into canonical IR shapes.
+    - ``effects``: object exposing ``EFFECTS`` — a dict of named handlers
+      swapped into specific executor decision points (see
+      ``manysql/codegen/effects_emit.py`` for the v1 registry).
     """
 
     def __init__(
@@ -72,10 +80,14 @@ class PlanExecutor:
         catalog: dict[str, pl.DataFrame],
         semantics: Optional[SemanticConfig] = None,
         overrides: Optional[Any] = None,
+        passes: Optional[Any] = None,
+        effects: Optional[Any] = None,
     ) -> None:
         self.catalog = catalog
         self.semantics = semantics or SemanticConfig.reference()
         self.overrides = overrides
+        self.passes = passes
+        self.effects = effects
         self._cte_bindings: dict[str, pl.DataFrame] = {}
 
     # -------- public entry --------
@@ -86,6 +98,7 @@ class PlanExecutor:
         *,
         outer_row: Optional[dict[str, Any]] = None,
     ) -> pl.DataFrame:
+        plan = apply_pre_passes(plan, self.semantics, self.passes)
         return self._dispatch(plan, outer_row or {})
 
     def evaluator(self, outer_row: Optional[dict[str, Any]] = None) -> ExprEvaluator:
@@ -94,6 +107,7 @@ class PlanExecutor:
             self,
             outer_row=outer_row,
             overrides=self.overrides,
+            effects=self.effects,
         )
 
     # -------- dispatch --------
@@ -648,10 +662,53 @@ def execute(
     semantics: SemanticConfig,
     catalog: dict[str, pl.DataFrame],
     overrides: Optional[Any] = None,
+    *,
+    passes: Optional[Any] = None,
+    effects: Optional[Any] = None,
 ) -> pl.DataFrame:
     """Convenience wrapper: build PlanExecutor and run.
 
-    `overrides` is forwarded to `PlanExecutor` so dialect-specific
-    function/operator implementations are reachable from FuncCalls.
+    `overrides`, `passes`, and `effects` are forwarded to `PlanExecutor`
+    so dialect-specific function/operator bodies, plan rewrites, and
+    runtime decision-point handlers are all reachable from a single
+    entry point.
     """
-    return PlanExecutor(catalog, semantics, overrides).execute(plan)
+    return PlanExecutor(
+        catalog,
+        semantics,
+        overrides=overrides,
+        passes=passes,
+        effects=effects,
+    ).execute(plan)
+
+
+def apply_pre_passes(
+    plan: Plan,
+    semantics: SemanticConfig,
+    passes_module: Optional[Any],
+) -> Plan:
+    """Apply a dialect's pre-execution passes to ``plan``.
+
+    A dialect's ``passes.py`` module exposes a ``PRE_EXECUTION_PASSES``
+    list of ``Callable[[Plan, SemanticConfig], Plan]``. They run in list
+    order between lowering and dispatch. Each pass must return a Plan;
+    the empty list (or a missing module) is a no-op.
+
+    A pass is *not* allowed to return ``None`` — that is treated as a
+    bug and surfaces as ``RuntimeError`` so dialect authors fail fast
+    rather than silently dropping the plan.
+    """
+    if passes_module is None:
+        return plan
+    seq = getattr(passes_module, "PRE_EXECUTION_PASSES", None)
+    if not seq:
+        return plan
+    for pass_fn in seq:
+        new_plan = pass_fn(plan, semantics)
+        if new_plan is None:
+            raise RuntimeError(
+                f"pre-execution pass {pass_fn!r} returned None; "
+                "passes must return a Plan"
+            )
+        plan = new_plan
+    return plan

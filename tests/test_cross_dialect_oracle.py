@@ -70,6 +70,8 @@ def members(emitted_dialect_root: Path) -> list[CrossDialectMember]:
                 lowering=engine.lowering,
                 semantics=engine.semantics,
                 overrides=engine.overrides,
+                passes=engine.passes,
+                effects=engine.effects,
             )
         )
     return out

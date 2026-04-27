@@ -115,11 +115,13 @@ class ExprEvaluator:
         *,
         outer_row: Optional[dict[str, Any]] = None,
         overrides: Optional[Any] = None,
+        effects: Optional[Any] = None,
     ) -> None:
         self.semantics = semantics
         self.executor = executor
         self.outer_row = outer_row or {}
         self.overrides = overrides
+        self.effects = effects
 
     # -------- public entry --------
 
@@ -195,9 +197,11 @@ class ExprEvaluator:
         right = self._dispatch(e.right)
         op = e.op
         if op == Op.EQ:
-            return left == right
+            eff = self._call_effect("text_eq", left, right)
+            return eff if eff is not None else left == right
         if op == Op.NEQ:
-            return left != right
+            eff = self._call_effect("text_neq", left, right)
+            return eff if eff is not None else left != right
         if op == Op.LT:
             return left < right
         if op == Op.LTE:
@@ -229,18 +233,61 @@ class ExprEvaluator:
         if op == Op.CONCAT:
             return self._concat(left, right)
         if op == Op.LIKE:
-            return self._like_lit(
+            return self._dispatch_like(
                 left,
                 self._extract_str_literal(e.right),
                 case_sensitive=self.semantics.like_case_sensitive,
             )
         if op == Op.ILIKE:
-            return self._like_lit(
+            return self._dispatch_like(
                 left,
                 self._extract_str_literal(e.right),
                 case_sensitive=False,
             )
         raise NotImplementedError(f"BinaryOp: {op}")
+
+    # -------- effect dispatch --------
+
+    def _resolve_effect(self, name: str):
+        """Return the dialect's handler for ``name`` or ``None``.
+
+        Effects are looked up in the dialect's ``effects.EFFECTS`` dict.
+        Absent dialects, absent ``EFFECTS``, or absent keys all fall
+        through to the canonical executor implementation.
+        """
+        if self.effects is None:
+            return None
+        registry = getattr(self.effects, "EFFECTS", None)
+        if not registry:
+            return None
+        return registry.get(name)
+
+    def _call_effect(
+        self, name: str, left: pl.Expr, right: pl.Expr
+    ) -> Optional[pl.Expr]:
+        """Invoke the named effect; return ``None`` to mean "fall back".
+
+        Handlers may also explicitly return ``None`` to defer to the
+        canonical implementation (e.g. when they detect the operands
+        aren't in their domain).
+        """
+        fn = self._resolve_effect(name)
+        if fn is None:
+            return None
+        return fn(left, right, self.semantics)
+
+    def _dispatch_like(
+        self, operand_expr: pl.Expr, pattern: str, *, case_sensitive: bool
+    ) -> pl.Expr:
+        """LIKE / ILIKE dispatch: try the ``text_in_pattern`` effect first."""
+        fn = self._resolve_effect("text_in_pattern")
+        if fn is not None:
+            result = fn(operand_expr, pattern, self.semantics, case_sensitive)
+            if result is not None:
+                return result
+        return self._like_lit(
+            operand_expr, pattern, case_sensitive=case_sensitive
+        )
 
     def _unary(self, e: UnaryOp) -> pl.Expr:
         operand = self._dispatch(e.operand)

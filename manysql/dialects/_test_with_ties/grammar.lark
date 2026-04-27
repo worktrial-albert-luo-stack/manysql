@@ -1,0 +1,5 @@
+// Synthetic test dialect: no real grammar.
+// The dialect tests the passes lane via direct IR construction; the
+// registry still requires `grammar.lark` to load, so this is a stub.
+
+start: "stub"

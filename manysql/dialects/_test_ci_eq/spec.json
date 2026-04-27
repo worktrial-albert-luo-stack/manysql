@@ -1,0 +1,8 @@
+{
+  "name": "_test_ci_eq",
+  "description": "Synthetic test dialect: exercises the executor effects lane via a text_eq handler that lowercases both operands before comparing them.",
+  "divergence_level": "moderate",
+  "surface_features": [],
+  "semantic_overrides": {},
+  "notes": "Test-only. Demonstrates per-dialect runtime semantics swap without IR changes."
+}

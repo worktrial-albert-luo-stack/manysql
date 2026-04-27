@@ -1,0 +1,142 @@
+{
+  "description": "T-SQL-flavored: bracket identifiers, + concat, LEN, case-insensitive default collation (effects.py lane).",
+  "divergence_level": "moderate",
+  "inspired_by": [
+    "sql_server"
+  ],
+  "name": "tsql_ish",
+  "notes": "The CI-AS default collation is intentionally NOT a SemanticConfig knob; it lives in the per-dialect effects.py lane (RFC 0002).",
+  "semantic_overrides": {
+    "division_by_zero": "error",
+    "identifier_case_fold": "preserve",
+    "ilike_supported": false,
+    "like_case_sensitive": false,
+    "quoted_identifiers_case_sensitive": false,
+    "string_concat_op": "+",
+    "sum_of_empty_returns_null": true
+  },
+  "semantics": {
+    "array_base_index": null,
+    "boolean_truthiness": null,
+    "count_distinct_null": null,
+    "division_by_zero": "error",
+    "group_by_accepts_select_aliases": null,
+    "identifier_case_fold": "preserve",
+    "ilike_supported": false,
+    "integer_division": null,
+    "like_case_sensitive": false,
+    "null_order_default_asc": null,
+    "null_order_default_desc": null,
+    "null_safe_eq_supported": null,
+    "quoted_identifiers_case_sensitive": false,
+    "select_resolves_through_group_by": null,
+    "set_op_default": null,
+    "string_concat_op": "+",
+    "sum_of_empty_returns_null": true,
+    "window_default_frame": null
+  },
+  "surface": {
+    "add_op": "+",
+    "as_keyword": "AS",
+    "between_keyword": "BETWEEN",
+    "case_keyword": "CASE",
+    "case_syntax": "case_when",
+    "cast_keyword": "CAST",
+    "cast_syntax": "cast_as",
+    "comment_styles": [
+      "line_dash_dash",
+      "block_c"
+    ],
+    "concat_op": "+",
+    "distinct_keyword": "DISTINCT",
+    "div_op": "/",
+    "else_keyword": "ELSE",
+    "end_keyword": "END",
+    "eq_op": "=",
+    "except_keyword": "EXCEPT",
+    "exists_keyword": "EXISTS",
+    "from_keyword": "FROM",
+    "function_aliases": {
+      "COALESCE": [
+        "COALESCE",
+        "ISNULL"
+      ],
+      "LENGTH": [
+        "LEN"
+      ],
+      "LOWER": [
+        "LOWER"
+      ],
+      "UPPER": [
+        "UPPER"
+      ]
+    },
+    "group_by_keyword": "GROUP BY",
+    "gt_op": ">",
+    "gte_op": ">=",
+    "having_keyword": "HAVING",
+    "identifier_quote": "bracket",
+    "ilike_keyword": "ILIKE",
+    "in_keyword": "IN",
+    "intersect_keyword": "INTERSECT",
+    "is_keyword": "IS",
+    "join_cross_keyword": "CROSS JOIN",
+    "join_full_keyword": "FULL JOIN",
+    "join_inner_keyword": "JOIN",
+    "join_left_keyword": "LEFT JOIN",
+    "join_right_keyword": "RIGHT JOIN",
+    "join_syntax": "ansi",
+    "like_keyword": "LIKE",
+    "limit_keyword": "LIMIT",
+    "limit_syntax": "limit_offset",
+    "lt_op": "<",
+    "lte_op": "<=",
+    "mod_op": "%",
+    "mul_op": "*",
+    "neq_op": [
+      "<>",
+      "!="
+    ],
+    "not_keyword": "NOT",
+    "null_keyword": "NULL",
+    "null_literal": "NULL",
+    "null_safe_eq_op": "IS NOT DISTINCT FROM",
+    "nulls_first_keyword": "NULLS FIRST",
+    "nulls_last_keyword": "NULLS LAST",
+    "order_by_keyword": "ORDER BY",
+    "order_by_position": "after_select",
+    "requires_semicolon": false,
+    "select_keyword": "SELECT",
+    "statement_terminator": ";",
+    "string_quote": "single",
+    "sub_op": "-",
+    "then_keyword": "THEN",
+    "union_keyword": "UNION",
+    "when_keyword": "WHEN",
+    "where_keyword": "WHERE",
+    "wildcard_char": "star",
+    "with_keyword": "WITH"
+  },
+  "surface_features": [
+    "between",
+    "case_when",
+    "cast_as",
+    "ctes",
+    "exists",
+    "group_by",
+    "having",
+    "in_list",
+    "in_subquery",
+    "inner_left_right_full_cross_join",
+    "is_distinct_from",
+    "is_null",
+    "join_using",
+    "like",
+    "limit_offset",
+    "order_by_nulls_first_last",
+    "select_distinct",
+    "subqueries_uncorrelated",
+    "where",
+    "windows_basic"
+  ]
+}

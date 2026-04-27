@@ -57,6 +57,8 @@ class CrossDialectMember:
     lowering: Any  # the lowering module
     semantics: SemanticConfig
     overrides: Optional[Any] = None
+    passes: Optional[Any] = None
+    effects: Optional[Any] = None
 
 
 class CrossDialectVerdict(str, Enum):
@@ -180,6 +182,8 @@ class CrossDialectOracle:
                 member.semantics,
                 catalog,
                 overrides=member.overrides,
+                passes=member.passes,
+                effects=member.effects,
             )
         except Exception as exc:  # noqa: BLE001
             return DialectExecution(

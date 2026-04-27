@@ -1,18 +1,23 @@
-"""Sandboxed loader for a dialect's `overrides.py`.
+"""Sandboxed loader for a dialect's `overrides.py` / `passes.py` / `effects.py`.
 
-Why sandbox? Generated overrides come either from an LLM (untrusted) or a
+Why sandbox? Generated dialect modules come either from an LLM (untrusted) or a
 human author (trusted, but still nice to fail loudly on accidents). The
 loader:
 
   - Restricts `__import__` to a small allowlist (polars, pyarrow, math,
-    typing, etc.). Any other import raises `OverrideImportError` at load
-    time.
+    typing, the manysql IR & spec modules, etc.). Any other import raises
+    `OverrideImportError` at load time.
   - Strips dangerous builtins (`open`, `eval`, `exec`, `compile`, `__import__`).
   - Compiles the source with the supplied filename so tracebacks are
     readable.
 
-The loader returns a plain `ModuleType` whose `FUNCTIONS` / `OPERATORS`
-dicts the executor can consult.
+The loader returns a plain `ModuleType` whose public dicts / lists the
+runtime can consult.
+
+`load_overrides` is the historical entry point and the default for
+`overrides.py`. `load_sandboxed_module` is a generic alias for callers
+loading `passes.py` or `effects.py`; both share the allowlist, since
+passes need to construct IR nodes and effects need IR-typed signatures.
 
 This sandbox is intentionally conservative: it stops accidents and
 trivial misuse. It does not defend against a determined adversary inside
@@ -47,27 +52,33 @@ _ALLOWED_IMPORTS: frozenset[str] = frozenset(
         "re",
         "json",
         "operator",
+        "dataclasses",
         "manysql.spec.semantics",
+        "manysql.ir.expr",
+        "manysql.ir.plan",
+        "manysql.ir.types",
     }
 )
 
 
 class OverrideImportError(RuntimeError):
-    """Raised when an override module attempts a disallowed import."""
+    """Raised when a dialect-extension module attempts a disallowed import."""
 
 
-def load_overrides(
+def load_sandboxed_module(
     source: str,
     *,
-    fullname: str = "_codegen_overrides",
+    fullname: str,
     extra_allowed: Optional[frozenset[str]] = None,
 ) -> ModuleType:
     """Compile and execute `source` with a restricted import allowlist.
 
-    The returned module is registered in `sys.modules[fullname]` so that
-    type-annotation and dataclass machinery can find it; callers should
-    prefer unique fullnames (typically `f"manysql._loaded.{dialect}.overrides"`)
-    to avoid collisions across dialects.
+    Used by the dialect registry to load any of `overrides.py`, `passes.py`,
+    `effects.py` from a per-dialect package. The returned module is
+    registered in `sys.modules[fullname]` so that type-annotation and
+    dataclass machinery can find it; callers should pass unique fullnames
+    (typically `f"manysql._loaded.{dialect}.{kind}"`) to avoid collisions
+    across dialects.
     """
     allowed = _ALLOWED_IMPORTS | (extra_allowed or frozenset())
 
@@ -134,4 +145,25 @@ _BLOCKED_BUILTINS: frozenset[str] = frozenset(
 )
 
 
-__all__ = ["OverrideImportError", "load_overrides"]
+def load_overrides(
+    source: str,
+    *,
+    fullname: str = "_codegen_overrides",
+    extra_allowed: Optional[frozenset[str]] = None,
+) -> ModuleType:
+    """Backwards-compatible alias for `load_sandboxed_module`.
+
+    Existing callers that load `overrides.py` keep working unchanged. New
+    callers loading `passes.py` / `effects.py` should prefer
+    `load_sandboxed_module` for clarity.
+    """
+    return load_sandboxed_module(
+        source, fullname=fullname, extra_allowed=extra_allowed
+    )
+
+
+__all__ = [
+    "OverrideImportError",
+    "load_overrides",
+    "load_sandboxed_module",
+]

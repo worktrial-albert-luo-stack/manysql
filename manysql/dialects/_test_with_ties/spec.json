@@ -1,0 +1,8 @@
+{
+  "name": "_test_with_ties",
+  "description": "Synthetic test dialect: exercises the Plan-rewrite passes lane via a __manysql_with_ties IR marker that passes.py desugars into canonical Window+Filter+Project.",
+  "divergence_level": "none",
+  "surface_features": [],
+  "semantic_overrides": {},
+  "notes": "Test-only. Not exercised by the SQL parser; loaded directly to verify the passes lane."
+}

@@ -5,7 +5,7 @@ Entry points:
     execute(plan, semantics, catalog) -> pl.DataFrame
 """
 
-from manysql.executor.engine import PlanExecutor, execute
+from manysql.executor.engine import PlanExecutor, apply_pre_passes, execute
 from manysql.executor.expr_eval import ExprEvaluator
 
-__all__ = ["PlanExecutor", "execute", "ExprEvaluator"]
+__all__ = ["PlanExecutor", "execute", "ExprEvaluator", "apply_pre_passes"]

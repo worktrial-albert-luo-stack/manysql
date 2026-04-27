@@ -68,7 +68,13 @@ Other constraints / non-goals (v0):
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
+
+# Tag used when training without the TRL tools API (single-turn mode).
+SQL_TAG_START = "<SQL>"
+SQL_TAG_END = "</SQL>"
+_SQL_TAG_RE = re.compile(r"<SQL>(.*?)</SQL>", re.DOTALL | re.IGNORECASE)
 
 from eval.validator import compare_results
 from train.env.engine import DialectRuntime
@@ -339,19 +345,27 @@ def reconstruct_turns(
 def _iter_assistant_with_tool_calls(
     completion: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Filter completion to assistant turns that emitted tool calls.
+    """Filter completion to assistant turns that have actionable SQL.
 
-    A free-text assistant turn (no ``tool_calls``) is the model writing
-    prose, e.g. "Here's the answer:". For our SQL setting it carries no
-    actionable signal; we count only structured tool calls as turns.
+    Accepts two formats:
+    * Structured tool_calls (TRL agent mode with ``tools=``).
+    * ``<SQL>...</SQL>`` tag in content (single-turn tag mode, no tools API needed).
     """
     out: list[dict[str, Any]] = []
     for turn in completion:
         if turn.get("role") != "assistant":
             continue
-        if not turn.get("tool_calls"):
-            continue
-        out.append(turn)
+        if turn.get("tool_calls"):
+            out.append(turn)
+        elif _SQL_TAG_RE.search(turn.get("content") or ""):
+            # Synthesise a fake tool_calls entry so the rest of
+            # reconstruct_turns can stay format-agnostic.
+            sql = _SQL_TAG_RE.search(turn["content"]).group(1).strip()
+            synthetic = dict(turn)
+            synthetic["tool_calls"] = [
+                {"function": {"name": "run_sql", "arguments": {"sql_command": sql}}}
+            ]
+            out.append(synthetic)
     return out
 
 
@@ -752,15 +766,42 @@ def trl_agent_system_prompt(
     return f"{body.rstrip()}\n\nDialect: {runtime.dialect}\n"
 
 
+TRL_TAG_BASE_RULES = (
+    "- You will be given a question (or a SQL translation request) about the data\n"
+    "  in the database, and a schema.\n"
+    "- Write exactly ONE SQL SELECT statement (or WITH ... SELECT) that answers\n"
+    "  the question in the target dialect.\n"
+    "- Wrap the final SQL between <SQL> and </SQL> tags. Example:\n"
+    "    <SQL>SELECT * FROM employees LIMIT 10</SQL>\n"
+    "- Only output SQL that is valid in the described dialect. Do NOT invent columns.\n"
+    "- Use LIMIT when the result could be unbounded; default LIMIT 10.\n"
+)
+
+
+def trl_tag_system_prompt(runtime: DialectRuntime) -> str:
+    """Variant of ``runtime.system_prompt()`` for single-turn tag mode.
+
+    The model writes SQL directly between ``<SQL>...</SQL>`` tags instead
+    of calling a tool. Compatible with ``GRPOTrainer`` without the
+    ``tools=`` parameter (works with trl <= 0.25.x).
+    """
+    body = runtime.system_prompt(base_rules=TRL_TAG_BASE_RULES)
+    return f"{body.rstrip()}\n\nDialect: {runtime.dialect}\n"
+
+
 __all__ = [
     "DEFAULT_MAX_TURNS",
     "DEFAULT_PREVIEW_LIMIT",
     "REWARD_COMPONENTS",
+    "SQL_TAG_END",
+    "SQL_TAG_START",
     "TRL_AGENT_BASE_RULES",
+    "TRL_TAG_BASE_RULES",
     "make_reward_funcs",
     "make_run_sql_tool",
     "reconstruct_turns",
     "score_completion",
     "tasks_to_dataset",
     "trl_agent_system_prompt",
+    "trl_tag_system_prompt",
 ]

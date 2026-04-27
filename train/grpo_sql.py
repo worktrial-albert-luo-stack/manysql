@@ -115,9 +115,10 @@ from collections import defaultdict
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
-# UNSLOTH_VLLM_STANDBY=1 unlocks ~30% more context length when vLLM and
-# training share GPU memory. Must be set before importing unsloth.
-os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
+# UNSLOTH_VLLM_STANDBY: disabled (0) because sleep() crashes with CUDA graphs
+# on H100. Set to 1 in the env if you want the ~30% extra context at the risk
+# of the cudaErrorIllegalAddress crash observed on this pod.
+os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "0")
 
 # Pull WANDB_API_KEY (and OPENAI_*, etc) from .env if present.
 try:
@@ -449,14 +450,16 @@ def build_dataset(
 
     from train.env.trl import (  # noqa: PLC0415
         tasks_to_dataset,
-        trl_agent_system_prompt,
+        trl_tag_system_prompt,
     )
 
     cap_tokens: int | None = None
     if tokenizer is not None:
-        cap_tokens = args.max_seq_length // 2  # mirrors grpo_gsm8k.py
+        # SQL prompts carry a full schema card (~2k tokens), so the gsm8k-style
+        # max_seq_length//2 cap drops every example. Leave a 1024-token budget
+        # for the completion instead.
+        cap_tokens = args.max_seq_length - 1024
 
-    multi = len(runtimes) > 1
     by_dialect: dict[str, list[SqlTask]] = defaultdict(list)
     for t in tasks:
         by_dialect[t.meta.dialect].append(t)
@@ -469,7 +472,8 @@ def build_dataset(
                 f"was built (have {sorted(runtimes)})"
             )
         rt = runtimes[dialect]
-        sys_prompt = trl_agent_system_prompt(rt, with_dialect_arg=multi)
+        # Tag mode: model writes <SQL>...</SQL> without needing trl tools API.
+        sys_prompt = trl_tag_system_prompt(rt)
         parts.append(
             tasks_to_dataset(
                 tasks=dt,
@@ -606,50 +610,19 @@ def _dry_run(args: TrainArgs) -> None:
 
 
 def _build_fake_completions(gold_sql: str) -> list[list[dict[str, Any]]]:
-    """Synthetic completions that exercise the reward branches.
+    """Synthetic completions exercising reward branches in tag mode.
 
-    Returns a list of TRL-shaped completions:
-
-    1. One-shot correct: tool calls gold SQL.
-    2. Two-step recovery: bad SQL, then gold SQL.
-    3. All parse errors: never produces valid SQL.
-    4. No tool calls at all: free-text response.
-
-    Same pattern as the GSM8K dry-run; here the SQL is real.
+    1. One-shot correct: <SQL> wraps gold SQL.
+    2. Wrong SQL: <SQL> wraps garbage that parses but produces wrong rows.
+    3. Parse error: <SQL> wraps something unparseable.
+    4. No tag at all: free-text response (nothing to score).
     """
     return [
-        [_assistant_call(gold_sql)],
-        [
-            _assistant_call("SELECT this_is_garbage"),
-            _tool_response("{}"),
-            _assistant_call(gold_sql),
-        ],
-        [
-            _assistant_call("this is not sql"),
-            _tool_response("{}"),
-            _assistant_call("still not sql"),
-        ],
+        [{"role": "assistant", "content": f"Here is the query:\n<SQL>{gold_sql}</SQL>"}],
+        [{"role": "assistant", "content": "<SQL>SELECT this_is_garbage</SQL>"}],
+        [{"role": "assistant", "content": "<SQL>this is not sql at all</SQL>"}],
         [{"role": "assistant", "content": "I don't know."}],
     ]
-
-
-def _assistant_call(sql: str) -> dict[str, Any]:
-    return {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "function": {
-                    "name": "run_sql",
-                    "arguments": {"sql_command": sql},
-                }
-            }
-        ],
-    }
-
-
-def _tool_response(content: str) -> dict[str, Any]:
-    return {"role": "tool", "content": content}
 
 
 # ---------------------------------------------------------------------------
@@ -691,8 +664,10 @@ def main() -> None:
     report_to = _configure_wandb(args)
 
     import torch  # noqa: PLC0415
-    from trl import GRPOConfig, GRPOTrainer  # noqa: PLC0415
+    # Order matters: unsloth must monkey-patch trl's GRPOTrainer (to share its
+    # vllm engine and accept vllm_sampling_params) BEFORE trl is imported.
     from unsloth import FastLanguageModel  # noqa: PLC0415  GPU-only import
+    from trl import GRPOConfig, GRPOTrainer  # noqa: PLC0415
     from vllm import SamplingParams  # noqa: PLC0415
 
     print(
@@ -766,7 +741,9 @@ def main() -> None:
         lr_scheduler_type="linear",
         optim="adamw_8bit",
         logging_steps=1,
-        per_device_train_batch_size=1,
+        # trl 0.22 requires generation_batch_size (per_device_train_batch_size *
+        # gradient_accumulation_steps) to be divisible by num_generations.
+        per_device_train_batch_size=args.num_generations,
         gradient_accumulation_steps=1,
         num_generations=args.num_generations,
         max_prompt_length=max_prompt_length,
@@ -779,23 +756,16 @@ def main() -> None:
         seed=args.seed,
     )
 
-    from train.env.trl import make_run_sql_tool  # noqa: PLC0415
-
-    # In single-dialect mode we hand the tool factory the lone runtime
-    # directly (back-compat run_sql signature). In multi-dialect mode
-    # we hand it the dict so the model emits run_sql(sql_command, dialect=...)
-    # and dispatch happens at call time.
-    tool_target = (
-        next(iter(runtimes.values())) if len(runtimes) == 1 else runtimes
-    )
-    run_sql_tool = make_run_sql_tool(tool_target)
     reward_funcs = make_reward_funcs(args, runtimes)
 
+    # Tag mode: no tools= arg needed. The model writes <SQL>...</SQL> and
+    # reward functions extract + execute SQL from the tag. Multi-turn tool
+    # execution can be re-enabled once trl >= 0.26 + transformers >= 5.0
+    # are jointly compatible with the rest of the stack.
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
         reward_funcs=reward_funcs,
-        tools=[run_sql_tool],
         args=grpo_config,
         train_dataset=train_ds,
     )

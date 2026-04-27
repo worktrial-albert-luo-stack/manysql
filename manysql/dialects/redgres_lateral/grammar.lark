@@ -1,0 +1,160 @@
+// Reference dialect grammar: near-ANSI SQL subset, enough to exercise every IR node.
+// Lowered to manysql IR by lowering.py.
+//
+// Convention: rules whose lowering depends on the *presence* of a keyword
+// (e.g. ALL in UNION ALL, RECURSIVE in WITH RECURSIVE, DISTINCT in SELECT)
+// either use the `!` prefix (keep all tokens) or wrap the keyword in a named
+// rule. Lark removes anonymous string literals from trees by default.
+
+start: statement
+
+statement: with_clause? query_expr ";"?
+
+!with_clause: "WITH"i ("RECURSIVE"i)? cte_list
+
+cte_list: cte ("," cte)*
+cte: IDENTIFIER "AS"i "(" query_expr ")"
+
+query_expr: select_core (set_op_branch)* (order_by)? (limit_clause)?
+
+set_op_branch: set_op select_core
+
+!set_op: "UNION"i ("ALL"i)? -> union
+       | "INTERSECT"i ("ALL"i)? -> intersect
+       | "EXCEPT"i ("ALL"i)? -> except_
+
+select_core: "SELECT"i distinct_marker? select_list "FROM"i from_clause where_clause? group_by_clause? having_clause?
+
+distinct_marker: "DISTINCT"i  -> select_distinct | "ALL"i -> select_all_marker
+
+where_clause: "WHERE"i expr
+group_by_clause: "GROUP"i "BY"i expr_list
+having_clause: "HAVING"i expr
+
+select_list: select_item ("," select_item)*
+select_item: "*"                              -> star
+           | IDENTIFIER "." "*"               -> qualified_star
+           | expr ("AS"i IDENTIFIER)?         -> select_expr
+
+from_clause: table_ref (join_clause)*
+
+table_ref: IDENTIFIER ("AS"i? IDENTIFIER)?    -> table_ident
+         | "(" query_expr ")" "AS"i? IDENTIFIER  -> table_subquery
+
+join_clause: join_kind table_ref join_condition?
+
+join_kind: "LATERAL"i "JOIN"i                  -> inner_join
+         | "LEFT"i "LATERAL"i "JOIN"i        -> left_join
+         | "RIGHT"i ("OUTER"i)? "JOIN"i       -> right_join
+         | "FULL"i ("OUTER"i)? "JOIN"i        -> full_join
+         | "CROSS"i "LATERAL"i "JOIN"i                   -> cross_join
+
+join_condition: "ON"i expr                    -> join_on
+              | "USING"i "(" col_list ")"     -> join_using
+
+col_list: IDENTIFIER ("," IDENTIFIER)*
+
+order_by: "ORDER"i "BY"i order_key ("," order_key)*
+
+!order_key: expr ("ASC"i | "DESC"i)? ("NULLS"i ("FIRST"i | "LAST"i))?
+
+limit_clause: "LIMIT"i INT ("OFFSET"i INT)?
+
+expr_list: expr ("," expr)*
+
+// --- expressions ---
+
+?expr: or_expr
+
+?or_expr: and_expr | or_expr_n
+or_expr_n: and_expr ("OR"i and_expr)+
+
+?and_expr: not_expr | and_expr_n
+and_expr_n: not_expr ("AND"i not_expr)+
+
+?not_expr: "NOT"i not_expr  -> not_op
+        | comparison
+
+?comparison: additive | comparison_n
+comparison_n: additive comp_tail+
+?comp_tail: comp_op additive          -> comp_pair
+         | "IS"i "NULL"i               -> is_null
+         | "IS"i "NOT"i "NULL"i        -> is_not_null
+         | "BETWEEN"i additive "AND"i additive -> between_op
+         | "NOT"i "BETWEEN"i additive "AND"i additive -> not_between_op
+         | "IN"i "(" expr_list ")"       -> in_list
+         | "NOT"i "IN"i "(" expr_list ")" -> not_in_list
+         | "IN"i "(" query_expr ")"      -> in_subquery_op
+         | "NOT"i "IN"i "(" query_expr ")" -> not_in_subquery_op
+         | "LIKE"i additive              -> like_op
+         | "ILIKE"i additive             -> ilike_op
+         | "IS"i "DISTINCT"i "FROM"i additive -> distinct_from
+         | "IS"i "NOT"i "DISTINCT"i "FROM"i additive -> not_distinct_from
+
+comp_op: "=" -> eq | "<>" -> neq | "!=" -> neq | "<" -> lt | "<=" -> lte | ">" -> gt | ">=" -> gte
+
+?additive: multiplicative | additive_n
+additive_n: multiplicative add_tail+
+?add_tail: "+" multiplicative -> add | "-" multiplicative -> sub | "||" multiplicative -> concat
+
+?multiplicative: unary | multiplicative_n
+multiplicative_n: unary mul_tail+
+?mul_tail: "*" unary -> mul | "/" unary -> div | "%" unary -> mod
+
+?unary: "-" unary -> neg
+      | "+" unary -> pos
+      | postfix
+
+?postfix: primary
+
+?primary: literal
+        | column_ref
+        | function_call
+        | case_expr
+        | cast_expr
+        | "EXISTS"i "(" query_expr ")"           -> exists_expr
+        | "NOT"i "EXISTS"i "(" query_expr ")"    -> not_exists_expr
+        | "(" query_expr ")"                     -> scalar_subquery
+        | "(" expr ")"                           -> paren_expr
+
+literal: NUMBER         -> number_literal
+       | STRING         -> string_literal
+       | "TRUE"i        -> true_literal
+       | "FALSE"i       -> false_literal
+       | "NULL"i        -> null_literal
+       | "DATE"i STRING -> date_literal
+
+column_ref: IDENTIFIER ("." IDENTIFIER)?
+
+function_call: IDENTIFIER "(" func_args ")" (filter_clause)? (over_clause)?
+
+func_args: "*"                              -> star_args
+         | distinct_kw? expr_list?          -> normal_args
+
+filter_clause: "FILTER"i "(" "WHERE"i expr ")"
+
+distinct_kw: "DISTINCT"i
+
+over_clause: "OVER"i "(" (partition_by)? (order_by)? ")"
+partition_by: "PARTITION"i "BY"i expr_list
+
+case_expr: "CASE"i case_branch+ case_else? "END"i
+case_branch: "WHEN"i expr "THEN"i expr
+case_else: "ELSE"i expr
+
+cast_expr: "CAST"i "(" expr "AS"i type_name ")"
+!type_name: "INT"i | "INTEGER"i | "BIGINT"i | "FLOAT"i | "DOUBLE"i
+         | "VARCHAR"i | "TEXT"i | "STRING"i
+         | "BOOLEAN"i | "BOOL"i
+         | "DATE"i | "TIMESTAMP"i
+
+// --- terminals ---
+
+IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/
+NUMBER: /\d+(\.\d+)?([eE][-+]?\d+)?/
+STRING: /'([^'\\]|\\.|'')*'/
+INT: /\d+/
+
+%ignore /\s+/
+%ignore /--[^\n]*/
+%ignore /\/\*([^*]|\*[^\/])*\*\//

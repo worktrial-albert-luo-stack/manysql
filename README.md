@@ -160,6 +160,7 @@ manysql-codegen --list
 | `aggressive_alien` | aggressive | NIL nulls, `::` casts, `~=` for null-safe equality, `+` for string concat, `OFFSET … FETCH` limits, no ILIKE, `HAVE` instead of `HAVING`, `ORDERED BY` instead of `ORDER BY`. Stresses the LLM refine loop. |
 | `snowflake_clone` | mild | Faithful Snowflake target: UPPER identifier fold, ILIKE, NULLS FIRST/LAST defaults, division-by-zero errors, integer division promotes to float, `//` line comments, `TRY_CAST`/`NVL`/`IFNULL` aliases. |
 | `sqlite_clone` | mild | Faithful SQLite target: preserve-case (ASCII-insensitive) identifiers, NULL-on-divide-by-zero, truncating integer division, case-insensitive `LIKE`, no `ILIKE`, C-style boolean truthiness, `IFNULL`/`SUBSTRING` aliases. Pairs with `snowflake_clone` to bracket realistic real-world divergence. |
+| `postgres_clone` | mild | Faithful Postgres target: lowercase identifier fold, NULLS LAST on ASC / FIRST on DESC, division-by-zero errors, truncating integer division, case-sensitive `LIKE`, native `ILIKE`, strict booleans, `CHAR_LENGTH`/`SUBSTRING` aliases. Used as the engine-perf baseline by [`eval/perf_bench.py`](eval/perf_bench.py). |
 
 ### Synth-generated dialects (sample)
 

@@ -22,6 +22,13 @@ dev = [
     "hypothesis>=6.100",
     "ruff>=0.4",
 ]
+# Extras for `eval/perf_bench.py`, which compares query latency between
+# real PostgreSQL and the manysql `postgres_clone` dialect engine. Only
+# pulled in when you actually want to run the bench (`uv sync --extra
+# bench`); the rest of the codebase doesn't need a Postgres driver.
+bench = [
+    "psycopg[binary]>=3.1",
+]
 
 [project.scripts]
 # Canonical name; recommended in scripts to avoid the `eval` shell builtin.
@@ -34,6 +41,9 @@ manysql-serve-eval = "eval.serve_lora:main"
 manysql-codegen = "manysql.codegen.__main__:main"
 # Inspect already-generated dialect packages (e.g. battery diffs).
 manysql-dialect = "manysql.dialects.__main__:main"
+# Compare query latency: real PostgreSQL vs the manysql postgres_clone
+# dialect engine on a shared synthetic dataset.
+manysql-perf-bench = "eval.perf_bench:main"
 
 [build-system]
 requires = ["hatchling"]

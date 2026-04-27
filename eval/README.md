@@ -102,6 +102,7 @@ eval/
 ├── prompt.py              # dialect-aware system prompt
 ├── runner.py              # generate → execute → retry → score
 ├── validator.py           # Jaccard / RMSE / F-score (port of tinybird's TS)
+├── perf_bench.py          # Postgres vs manysql `postgres_clone` perf bench
 ├── executors/
 │   ├── base.py            # SqlExecutor protocol
 │   ├── sqlite_executor.py # default
@@ -176,6 +177,92 @@ uv run manysql-codegen gen aggressive_alien --use-llm --overwrite
 
 This needs `OPENAI_API_KEY` or `OPENROUTER_API_KEY` (configurable via
 `OPENAI_MODEL` / `OPENROUTER_MODEL`).
+
+## Performance benchmarking (Postgres vs `postgres_clone`)
+
+The LLM-correctness harness above is orthogonal to *engine* perf. To compare
+how fast each engine actually executes the same query, `eval/perf_bench.py`
+runs a curated dialect-neutral suite against:
+
+1. A real **PostgreSQL** server (via `psycopg`).
+2. The **manysql `postgres_clone`** dialect (Lark parse → IR lowering →
+   Polars execution), generated from
+   [`manysql/spec/examples/postgres_clone.py`](../manysql/spec/examples/postgres_clone.py).
+
+Both engines see the same `github_events` rows (the deterministic synthetic
+dataset from `eval/dataset/github_events.py`), the same 15 SQL statements,
+and the same warmup/repeat schedule, so the resulting timings are directly
+comparable.
+
+### Setup
+
+```bash
+# 1. Install the bench extra (adds psycopg[binary]).
+uv sync --extra dev --extra bench
+
+# 2. Generate the postgres_clone dialect package (one-time, deterministic).
+uv run manysql-codegen gen postgres_clone
+
+# 3. Point the bench at a Postgres instance. The fastest path is Docker:
+docker run -d --name manysql-pg \
+    -p 5432:5432 \
+    -e POSTGRES_PASSWORD=postgres \
+    -e POSTGRES_DB=manysql_bench \
+    postgres:16
+export BENCH_POSTGRES_URL=postgresql://postgres:postgres@localhost:5432/manysql_bench
+```
+
+`--postgres-url`, `BENCH_POSTGRES_URL`, and `DATABASE_URL` are all
+recognized (in that priority order). The bench creates / truncates the
+`github_events` table on each run, so it's safe to point at a throwaway
+DB but **not** at production.
+
+### Running the bench
+
+```bash
+# Show the curated query suite (no DB needed).
+uv run manysql-perf-bench --list
+
+# Default: 50k rows, 1 warmup + 5 timed reps per query.
+uv run manysql-perf-bench
+
+# Larger dataset, more reps:
+uv run manysql-perf-bench --rows 200000 --repeats 10 --warmup 2
+
+# Subset of queries:
+uv run manysql-perf-bench --queries q01_count_stars,q05_top_pushers_having
+
+# Persist per-query timings as JSON for plotting / regression tracking:
+uv run manysql-perf-bench --output bench_$(date +%s).json
+
+# Skip the result-equivalence check (faster, but won't catch divergences).
+uv run manysql-perf-bench --no-verify
+```
+
+The script prints a Rich summary table with median / p95 latency for each
+engine and the manysql/Postgres ratio, plus a one-line geometric-mean
+speedup at the end. Equivalence checking normalizes Postgres `Decimal`
+to `float`, rounds floats to 6 dp, and compares unordered when the SQL
+has no `ORDER BY`, so minor numeric / ordering differences don't trip
+false negatives — but real semantic divergences (e.g. NULL ordering,
+case folding) will surface as a `[mismatch]` annotation.
+
+### What's *not* in the suite (and why)
+
+* `DATE_PART('year', CAST(text_col AS TIMESTAMP))` — Postgres handles the
+  string→timestamp cast natively, but manysql's Cast currently delegates
+  to Polars's strict=False cast, which returns NULL on ISO 8601 strings
+  (Polars expects `str.to_datetime(format=...)`). Adding the query would
+  produce a real divergence rather than a perf signal. The suite covers
+  the same intent via `SUBSTRING(created_at, 1, 4)` (q04).
+* SQLite-only functions (`strftime`, `LOG10`, …) — not portable to
+  Postgres. The LLM-correctness harness in this directory still uses
+  them via the SQLite reference executor; the perf bench deliberately
+  doesn't.
+
+To add a query, append a `BenchQuery(name, description, sql)` to
+`_BENCH_QUERIES` in `eval/perf_bench.py`. The SQL must parse and execute
+on both engines without translation — no dialect-specific shims.
 
 ## Serving a trained LoRA adapter
 

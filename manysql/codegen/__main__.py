@@ -66,6 +66,7 @@ _BUNDLED_EXAMPLES: dict[str, str] = {
     "aggressive_alien": "manysql.spec.examples.aggressive_alien:AGGRESSIVE_ALIEN",
     "snowflake_clone": "manysql.spec.examples.snowflake_clone:SNOWFLAKE_CLONE",
     "sqlite_clone": "manysql.spec.examples.sqlite_clone:SQLITE_CLONE",
+    "postgres_clone": "manysql.spec.examples.postgres_clone:POSTGRES_CLONE",
 }
 
 

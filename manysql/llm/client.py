@@ -117,6 +117,74 @@ class LLMConfig:
         )
 
 
+def _coerce_json_text(text: str) -> str:
+    """Best-effort cleanup of a chat reply before json.loads().
+
+    Handles two common deviations from clean JSON:
+      1. Triple-backtick fences like ```json\\n{...}\\n``` (Claude does this
+         a lot, even with explicit JSON-mode prompts).
+      2. Stray prose before/after a single top-level JSON object.
+
+    Returns the original text unchanged if neither pattern matches, so
+    strict parses are never weakened.
+    """
+    s = text.strip()
+    if s.startswith("```"):
+        # Drop the opening fence (``` or ```json / ```JSON / ```javascript)
+        first_nl = s.find("\n")
+        if first_nl != -1:
+            s = s[first_nl + 1 :]
+        # Drop the trailing fence
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[: -len("```")]
+        s = s.strip()
+
+    # If there's still leading/trailing prose, peel down to the outermost
+    # balanced JSON object. We deliberately ignore arrays and primitives
+    # because chat_json's contract is "object reply".
+    if s and s[0] != "{":
+        start = s.find("{")
+        if start == -1:
+            return text  # nothing to recover from; let json.loads fail
+        s = s[start:]
+    end = _find_matching_brace(s)
+    if end != -1:
+        s = s[: end + 1]
+    return s
+
+
+def _find_matching_brace(s: str) -> int:
+    """Return index of the '}' that closes the leading '{', or -1.
+
+    Tracks string state so braces inside JSON string literals don't fool
+    the depth counter. Handles backslash escapes minimally (enough for
+    well-formed JSON; we still defer real validation to json.loads).
+    """
+    if not s or s[0] != "{":
+        return -1
+    depth = 0
+    in_string = False
+    escape = False
+    for i, ch in enumerate(s):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
 class LLMClient:
     """Thin chat-completions client. Backend chosen at construction time."""
 
@@ -255,7 +323,15 @@ class LLMClient:
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
     ) -> dict[str, Any]:
-        """Convenience: ask for a JSON object reply and parse it."""
+        """Convenience: ask for a JSON object reply and parse it.
+
+        Some providers (notably Anthropic, even with explicit JSON-mode
+        instructions) wrap the reply in a markdown ```json ... ``` fence
+        or add a small amount of prose around it. We try strict parsing
+        first, then fall back to (a) stripping a single fenced code
+        block, then (b) extracting the largest balanced ``{...}``
+        substring. Anything beyond that is a real malformed response.
+        """
         resp = self.chat(
             system=system,
             user=user,
@@ -265,10 +341,13 @@ class LLMClient:
             max_tokens=max_tokens,
             json_mode=True,
         )
+        cleaned = _coerce_json_text(resp.text)
         try:
-            return json.loads(resp.text)
+            return json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            raise LLMError(f"Reply was not valid JSON: {exc}\n--- reply ---\n{resp.text}")
+            raise LLMError(
+                f"Reply was not valid JSON: {exc}\n--- reply ---\n{resp.text}"
+            )
 
     def _headers(self) -> dict[str, str]:
         if self.config.backend == LLMBackend.ANTHROPIC:

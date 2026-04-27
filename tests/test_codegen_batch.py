@@ -495,3 +495,53 @@ def test_run_campaign_interrupt_during_design_writes_partial_manifest(
     payload = json.loads(manifest_path.read_text())
     assert {d["spec"]["name"] for d in payload["drafted"]} == {"alpha"}
     assert payload["packaged"] == []
+
+
+# --- iteration caps propagation ---
+
+
+def test_run_campaign_propagates_iteration_caps_to_writer(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """CampaignConfig's grammar/lowering iteration caps reach the writer.
+
+    The CLI flags --grammar-max-iterations / --lowering-max-iterations
+    only matter if they actually thread through into write_dialect_package.
+    We monkey-patch the writer with a recorder and assert the captured
+    kwargs match the config.
+    """
+    from manysql.codegen import batch as batch_mod
+    from manysql.codegen.pipeline import PackageWriteResult
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_write(spec: Any, root: Path, **kwargs: Any) -> PackageWriteResult:
+        captured.append(kwargs)
+        return PackageWriteResult(
+            name=spec.name,
+            path=root / spec.name,
+            written_files=[],
+        )
+
+    monkeypatch.setattr(batch_mod, "write_dialect_package", fake_write)
+
+    replies = [_brief_reply(), _design_reply("alpha", divergence="mild")]
+    llm = _ScriptedLLM(replies)
+    cfg = CampaignConfig(
+        n=1,
+        theme="mild",
+        grammar_max_iterations=5,
+        lowering_max_iterations=8,
+    )
+    run_campaign(cfg, llm=llm, dialects_root=tmp_path / "fresh")
+
+    assert len(captured) == 1
+    assert captured[0]["grammar_max_iterations"] == 5
+    assert captured[0]["lowering_max_iterations"] == 8
+
+
+def test_campaign_config_to_dict_includes_iteration_caps() -> None:
+    cfg = CampaignConfig(n=1, grammar_max_iterations=4, lowering_max_iterations=8)
+    d = cfg.to_dict()
+    assert d["grammar_max_iterations"] == 4
+    assert d["lowering_max_iterations"] == 8

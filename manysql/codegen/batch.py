@@ -83,6 +83,11 @@ class CampaignConfig:
     model: Optional[str] = None
     max_concurrency: int = 4
     require_battery_pass: bool = False
+    # Caps on the inner pipeline's LLM refinement loops. Mirror the
+    # defaults from manysql.codegen.pipeline.write_dialect_package so
+    # batch behavior matches single-spec behavior unless overridden.
+    grammar_max_iterations: int = 3
+    lowering_max_iterations: int = 3
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +100,8 @@ class CampaignConfig:
             "model": self.model,
             "max_concurrency": self.max_concurrency,
             "require_battery_pass": self.require_battery_pass,
+            "grammar_max_iterations": self.grammar_max_iterations,
+            "lowering_max_iterations": self.lowering_max_iterations,
         }
 
 
@@ -682,6 +689,8 @@ def _fan_out_packages(
                 llm_client=llm,
                 require_battery_pass=config.require_battery_pass,
                 force_llm=real_llm,
+                grammar_max_iterations=config.grammar_max_iterations,
+                lowering_max_iterations=config.lowering_max_iterations,
             )
             future_to_name[fut] = spec.name
             future_started[fut] = time.monotonic()

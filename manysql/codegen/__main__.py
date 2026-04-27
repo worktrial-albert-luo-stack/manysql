@@ -139,6 +139,21 @@ def _add_gen_parser(sub: argparse._SubParsersAction) -> None:
         "battery still has failures after refinement.",
     )
     gen.add_argument(
+        "--grammar-max-iterations",
+        type=int,
+        default=3,
+        help="Max LLM refinement rounds for the grammar agent "
+        "(default: 3). Each round is one extra LLM call per spec.",
+    )
+    gen.add_argument(
+        "--lowering-max-iterations",
+        type=int,
+        default=3,
+        help="Max LLM refinement rounds for the lowering agent "
+        "(default: 3). Bumping this gives the agent more shots at "
+        "fixing IR-equivalence failures, at proportional API cost.",
+    )
+    gen.add_argument(
         "--dialects-dir",
         default=None,
         help="Override the output root (default: manysql/dialects/).",
@@ -209,6 +224,20 @@ def _add_batch_parser(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Reject any dialect whose parse / IR battery still fails "
         "after refinement.",
+    )
+    batch.add_argument(
+        "--grammar-max-iterations",
+        type=int,
+        default=3,
+        help="Max LLM refinement rounds for the grammar agent on each "
+        "spec (default: 3).",
+    )
+    batch.add_argument(
+        "--lowering-max-iterations",
+        type=int,
+        default=3,
+        help="Max LLM refinement rounds for the lowering agent on each "
+        "spec (default: 3). Higher caps cost proportionally more.",
     )
     batch.add_argument(
         "--dialects-dir",
@@ -515,6 +544,8 @@ def _run_gen(args: argparse.Namespace, console: Console) -> int:
             llm_client=llm_client,
             require_battery_pass=args.require_battery_pass,
             force_llm=bool(llm_client),
+            grammar_max_iterations=args.grammar_max_iterations,
+            lowering_max_iterations=args.lowering_max_iterations,
         )
     except FileExistsError as exc:
         console.print(f"[red]{exc}[/red]")
@@ -552,6 +583,8 @@ def _run_batch(args: argparse.Namespace, console: Console) -> int:
         model=args.model,
         max_concurrency=args.max_concurrency,
         require_battery_pass=args.require_battery_pass,
+        grammar_max_iterations=args.grammar_max_iterations,
+        lowering_max_iterations=args.lowering_max_iterations,
     )
     root = Path(args.dialects_dir) if args.dialects_dir else DIALECTS_DIR
 

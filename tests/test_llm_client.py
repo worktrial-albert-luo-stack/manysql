@@ -76,6 +76,37 @@ def test_null_client_chat_json_raises_on_bad_payload() -> None:
         client.chat_json(user="give json")
 
 
+# Reply-cleanup behavior of chat_json. Anthropic (and occasionally other
+# providers) like to wrap JSON in a ```json ... ``` markdown fence even
+# when explicitly told to return raw JSON. chat_json must tolerate that.
+
+def test_chat_json_strips_json_code_fence() -> None:
+    payload = '```json\n{"a": 1, "b": [1, 2]}\n```'
+    client = NullLLMClient(canned_reply=payload)
+    assert client.chat_json(user="x") == {"a": 1, "b": [1, 2]}
+
+
+def test_chat_json_strips_bare_code_fence() -> None:
+    payload = '```\n{"k": "v"}\n```'
+    client = NullLLMClient(canned_reply=payload)
+    assert client.chat_json(user="x") == {"k": "v"}
+
+
+def test_chat_json_strips_leading_and_trailing_prose() -> None:
+    payload = 'Sure, here you go:\n{"k": 1}\n— let me know if you need more.'
+    client = NullLLMClient(canned_reply=payload)
+    assert client.chat_json(user="x") == {"k": 1}
+
+
+def test_chat_json_handles_braces_inside_strings() -> None:
+    # The brace-balancer must respect string state or it'll close the
+    # outer object early on a nested literal that contains "}".
+    payload = '```json\n{"text": "she said \\"}{\\"", "n": 2}\n```'
+    client = NullLLMClient(canned_reply=payload)
+    out = client.chat_json(user="x")
+    assert out == {"text": 'she said "}{"', "n": 2}
+
+
 def test_messages_list_passes_through() -> None:
     client = NullLLMClient(canned_reply="ok")
     msgs = [

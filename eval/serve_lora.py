@@ -55,14 +55,29 @@ server running after all evals finish (useful for ad-hoc curl probes
 or rerunning the eval CLI manually); the script then prints the
 endpoint and the lora-name and exits 0 without killing vllm.
 
+Base-model baseline (no LoRA)
+-----------------------------
+
+Omit ``--lora-path`` to serve the bare base model. The vllm command
+then drops ``--enable-lora``/``--lora-modules`` and the eval CLI is
+called with ``--model <base-model>``. Useful for establishing a
+pre-training baseline against which you can compare your LoRA
+checkpoints on the same dialects::
+
+    python -m eval.serve_lora \\
+        --base-model unsloth/Qwen3-4B-Instruct-2507 \\
+        --dialects aggressive_alien,mild_postgres_ish --limit 20
+
 Pre-existing server
 -------------------
 
 If you've already started vllm yourself (e.g. via ``vllm serve`` in a
 tmux pane), pass ``--no-server`` and the script will skip launch +
 teardown and just dispatch eval runs against ``--vllm-base-url``
-(default ``http://localhost:8000/v1``). The ``--lora-name`` you pass
-must match what the existing server exposes.
+(default ``http://localhost:8000/v1``). With ``--no-server`` and
+``--lora-path`` set, ``--lora-name`` must match the module name the
+existing server exposes; without ``--lora-path`` the eval is
+dispatched against ``--base-model`` (so that must match too).
 """
 
 from __future__ import annotations
@@ -132,7 +147,7 @@ class RunConfig:
 def build_vllm_command(
     *,
     base_model: str,
-    lora_path: Path,
+    lora_path: Path | None,
     lora_name: str,
     port: int,
     host: str,
@@ -145,16 +160,16 @@ def build_vllm_command(
 
     We use the modern ``vllm serve <model>`` entrypoint (vllm >= 0.4)
     rather than the older ``python -m vllm.entrypoints.openai.api_server``
-    form. ``--enable-lora`` + ``--lora-modules <name>=<path>`` registers
-    the adapter under ``<name>``, which is the model id clients send.
+    form. When ``lora_path`` is given, ``--enable-lora`` +
+    ``--lora-modules <name>=<path>`` registers the adapter under
+    ``<name>``, which is the model id clients send. When ``lora_path``
+    is ``None`` we serve the base model bare (no LoRA flags) for
+    baseline evals; clients then send ``base_model`` as the model id.
     """
     cmd = [
         "vllm",
         "serve",
         base_model,
-        "--enable-lora",
-        "--lora-modules",
-        f"{lora_name}={lora_path}",
         "--host",
         host,
         "--port",
@@ -162,6 +177,12 @@ def build_vllm_command(
         "--gpu-memory-utilization",
         str(gpu_memory_utilization),
     ]
+    if lora_path is not None:
+        cmd += [
+            "--enable-lora",
+            "--lora-modules",
+            f"{lora_name}={lora_path}",
+        ]
     if max_model_len is not None:
         cmd += ["--max-model-len", str(max_model_len)]
     if dtype:
@@ -235,7 +256,7 @@ def shutdown_server(proc: subprocess.Popen[bytes], *, grace_s: float = 10.0) -> 
 def run_one_eval(
     *,
     base_url: str,
-    lora_name: str,
+    model_id: str,
     config: RunConfig,
     passthrough: list[str],
 ) -> int:
@@ -244,6 +265,10 @@ def run_one_eval(
     Calls in-process (rather than spawning a subprocess) because the
     eval module is pure-Python + httpx; importing it is cheap and we
     avoid double-loading the venv. Each call gets a fresh ``argv``.
+
+    ``model_id`` is what we send as ``--model`` to eval; it's the LoRA
+    module name when serving an adapter, or the base model id when
+    running the base model bare.
     """
     from eval.__main__ import main as eval_main  # noqa: PLC0415
 
@@ -253,7 +278,7 @@ def run_one_eval(
         "--vllm-base-url",
         base_url,
         "--model",
-        lora_name,
+        model_id,
     ]
     argv += config.to_eval_argv()
     argv += passthrough
@@ -347,16 +372,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--lora-path",
-        required=True,
+        default=None,
         type=Path,
-        help="Path to the LoRA adapter directory written by training.",
+        help=(
+            "Path to the LoRA adapter directory written by training. "
+            "Omit to serve and evaluate the bare base model (useful as a "
+            "baseline against trained checkpoints)."
+        ),
     )
     p.add_argument(
         "--lora-name",
         default=None,
         help=(
             "Model id to register the LoRA under (and pass to eval as --model). "
-            "Default: last path component of --lora-path."
+            "Default: last path component of --lora-path. Ignored when no "
+            "--lora-path is given."
         ),
     )
     p.add_argument("--host", default="0.0.0.0", help="vLLM bind host (default: %(default)s).")
@@ -497,14 +527,31 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    if not args.no_server and not args.lora_path.exists():
+    if (
+        not args.no_server
+        and args.lora_path is not None
+        and not args.lora_path.exists()
+    ):
         print(
             f"error: --lora-path {args.lora_path} does not exist",
             file=sys.stderr,
         )
         return 2
 
-    lora_name = args.lora_name or args.lora_path.resolve().name
+    # When no LoRA is given, the model id we send to eval is the bare base
+    # model. When a LoRA *is* given, the LoRA module name (registered via
+    # --lora-modules <name>=<path>) is what clients must send.
+    if args.lora_path is not None:
+        model_id = args.lora_name or args.lora_path.resolve().name
+    else:
+        if args.lora_name:
+            print(
+                "warning: --lora-name has no effect without --lora-path; "
+                "using --base-model as the eval model id",
+                file=sys.stderr,
+            )
+        model_id = args.base_model
+
     base_url = args.vllm_base_url or f"http://{args.host or 'localhost'}:{args.port}/v1"
     # Localhost is friendlier than 0.0.0.0 for httpx; only the *bind* host
     # needs to be 0.0.0.0 for external access.
@@ -517,9 +564,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: failed to build run configs: {exc}", file=sys.stderr)
         return 2
 
+    lora_desc = str(args.lora_path) if args.lora_path is not None else "<none: base model>"
     print(
-        f"[serve_lora] base_model={args.base_model} lora={args.lora_path} "
-        f"lora_name={lora_name} base_url={base_url}",
+        f"[serve_lora] base_model={args.base_model} lora={lora_desc} "
+        f"model_id={model_id} base_url={base_url}",
         file=sys.stderr,
     )
     print(
@@ -535,8 +583,8 @@ def main(argv: list[str] | None = None) -> int:
         max_model_len = args.max_model_len if args.max_model_len > 0 else None
         cmd = build_vllm_command(
             base_model=args.base_model,
-            lora_path=args.lora_path.resolve(),
-            lora_name=lora_name,
+            lora_path=args.lora_path.resolve() if args.lora_path is not None else None,
+            lora_name=model_id,
             port=args.port,
             host=args.host,
             max_model_len=max_model_len,
@@ -586,7 +634,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 rc_code = run_one_eval(
                     base_url=base_url,
-                    lora_name=lora_name,
+                    model_id=model_id,
                     config=rc,
                     passthrough=passthrough,
                 )

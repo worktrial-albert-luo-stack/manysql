@@ -176,6 +176,14 @@ uv run manysql-serve-eval \
     --dialects aggressive_alien,mild_postgres_ish,tsql_ish \
     --limit 20 --concurrency 4
 
+# baseline: same configs against the bare base model (no LoRA).
+# Omit --lora-path; we drop --enable-lora and dispatch eval with
+# --model <base-model>.
+uv run manysql-serve-eval \
+    --base-model unsloth/Qwen3-4B-Instruct-2507 \
+    --dialects aggressive_alien,mild_postgres_ish,tsql_ish \
+    --limit 20 --concurrency 4
+
 # heterogeneous runs from a JSON config
 cat > my_runs.json <<'EOF'
 [

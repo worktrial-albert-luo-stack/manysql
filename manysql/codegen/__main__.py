@@ -64,6 +64,8 @@ _BUNDLED_EXAMPLES: dict[str, str] = {
     "mild_postgres_ish": "manysql.spec.examples.mild_postgres_ish:MILD_POSTGRES_ISH",
     "moderate_keyword_swap": "manysql.spec.examples.moderate_keyword_swap:MODERATE_KEYWORD_SWAP",
     "aggressive_alien": "manysql.spec.examples.aggressive_alien:AGGRESSIVE_ALIEN",
+    "snowflake_clone": "manysql.spec.examples.snowflake_clone:SNOWFLAKE_CLONE",
+    "sqlite_clone": "manysql.spec.examples.sqlite_clone:SQLITE_CLONE",
 }
 
 

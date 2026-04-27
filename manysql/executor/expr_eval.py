@@ -93,6 +93,18 @@ def _like_pattern_to_regex(pat: str, case_sensitive: bool) -> str:
     return pattern
 
 
+def _trunc_div_pl(n: pl.Expr, d: int) -> pl.Expr:
+    """Integer division of a Polars expression that truncates toward zero.
+
+    Polars (and Python) ``//`` floors toward negative infinity, but SQL
+    integer division truncates toward zero. Only matters for negative
+    numerators (``-6 // 7`` = -1, but trunc-div is 0). Branching on the
+    sign keeps the semantics aligned with SemanticConfig.integer_division
+    and with sqlite's STRFTIME-arithmetic behavior used by BIRD gold SQL.
+    """
+    return pl.when(n >= 0).then(n // d).otherwise(-((-n) // d))
+
+
 def _to_bool(e: pl.Expr, semantics: SemanticConfig) -> pl.Expr:
     """Coerce an expression to boolean according to the truthiness knob.
 
@@ -408,13 +420,17 @@ class ExprEvaluator:
         if name == "DATE_SUB":
             return args[0] - pl.duration(days=args[1])
         if name == "DATE_DIFF":
-            # DATE_DIFF('day', a, b) = days between
+            # DATE_DIFF('unit', a, b): components-of(b) - components-of(a).
+            # FENCEPOST semantics for calendar units (year/quarter/month):
+            # only the boundary count, e.g. DATE_DIFF('month', '2024-01-31',
+            # '2024-02-01') = 1. Matches sqlite's STRFTIME-arithmetic
+            # convention used throughout BIRD gold SQL. The TRUNCATING
+            # variant (count-completed-months-only) is deferred to the
+            # `date_diff_policy` SemanticConfig knob in RFC 0001.
             unit = self._extract_str_literal(e.args[0]).lower() if len(e.args) >= 3 else "day"
             a = args[-2]
             b = args[-1]
-            if unit in ("day", "days"):
-                return (b - a).dt.total_days()
-            raise NotImplementedError(f"DATE_DIFF unit: {unit}")
+            return self._date_diff(unit, a, b)
         if name == "ROUND":
             if len(args) == 1:
                 return args[0].round(0)
@@ -472,6 +488,39 @@ class ExprEvaluator:
             if op is not None:
                 return op
         return None
+
+    def _date_diff(self, unit: str, a: pl.Expr, b: pl.Expr) -> pl.Expr:
+        """``DATE_DIFF(unit, a, b)`` -> Polars expression for ``b`` minus ``a``.
+
+        Calendar units (``year`` / ``quarter`` / ``month``) use
+        FENCEPOST semantics: count the boundaries crossed, not the
+        completed periods. Sub-day units use total-elapsed semantics
+        truncated toward zero. Both match what ``STRFTIME``-arithmetic
+        yields in sqlite, which is the BIRD gold SQL convention.
+        """
+        if unit in ("day", "days"):
+            return (b - a).dt.total_days()
+        if unit in ("week", "weeks"):
+            # SQL semantics truncate toward zero; Python/Polars ``//``
+            # floors toward negative infinity. The two agree for
+            # exact multiples but diverge on negative non-multiples
+            # (e.g. -6 // 7 = -1 vs. trunc-div = 0). Branch on sign
+            # to get trunc semantics.
+            return _trunc_div_pl((b - a).dt.total_days(), 7)
+        if unit in ("month", "months"):
+            return (b.dt.year() - a.dt.year()) * 12 + (b.dt.month() - a.dt.month())
+        if unit in ("quarter", "quarters"):
+            months = (b.dt.year() - a.dt.year()) * 12 + (b.dt.month() - a.dt.month())
+            return _trunc_div_pl(months, 3)
+        if unit in ("year", "years", "yyyy"):
+            return b.dt.year() - a.dt.year()
+        if unit in ("hour", "hours"):
+            return (b - a).dt.total_hours()
+        if unit in ("minute", "minutes"):
+            return (b - a).dt.total_minutes()
+        if unit in ("second", "seconds"):
+            return (b - a).dt.total_seconds()
+        raise NotImplementedError(f"DATE_DIFF unit: {unit}")
 
     def _date_part(self, part: str, col: pl.Expr) -> pl.Expr:
         if part in ("year", "yyyy"):

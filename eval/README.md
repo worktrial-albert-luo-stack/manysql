@@ -50,7 +50,30 @@ uv run manysql-eval --provider openai --model gpt-4o-mini --limit 5
 # Parallelize LLM calls across 8 worker threads (~Nx wall-clock speedup
 # until you hit the provider's rate limit / your local vLLM throughput):
 uv run manysql-eval --provider openai --model gpt-4o-mini -j 8
+
+# Evaluating a LoRA trained by `train/grpo_sql.py`: switch the prompt
+# format so the system message matches what the model was trained on.
+uv run manysql-eval --provider vllm \
+    --vllm-base-url http://localhost:8000/v1 \
+    --model my-lora \
+    --prompt-mode tag --backend synthetic \
+    --synthetic-dialect aggressive_alien
 ```
+
+### Prompt formats (`--prompt-mode`)
+
+Two prompt formats ship; the dialect hints, schema body, and reference
+SQL all stay identical between them:
+
+| Mode | Output instruction | Use when |
+| --- | --- | --- |
+| `plain` (default) | "Return ONLY the SQL query, with no markdown, no fences, no commentary." | Closed-source frontier models (GPT-4o, Claude, Gemini) — they follow plain-text instructions reliably. |
+| `tag` | "Wrap the final SQL between `<SQL>` and `</SQL>` tags." | Any LoRA produced by `train/grpo_sql.py` — the GRPO reward function trains the model to emit `<SQL>...</SQL>`, and a plain-mode eval would instruct the model to do something other than what it's been trained to do. |
+
+`extract_sql` is tag-aware in *either* mode: a tag-trained model run
+under `--prompt-mode plain` is still scored correctly (the extractor
+strips the tags). The mode mostly affects whether the system prompt
+*contradicts* what the model learned.
 
 The `--limit N` flag is applied *after* `--questions`, so you can combine
 them (e.g. `--questions q40,q47,q50 --limit 2` runs the first two of those
@@ -168,6 +191,15 @@ it spawns `vllm serve <base> --enable-lora --lora-modules <name>=<path>`,
 waits for `/v1/models` to come up, runs each requested eval config
 against `http://localhost:<port>/v1` with `--provider vllm --model <name>`,
 then tears the server down.
+
+The wrapper defaults to `--prompt-mode tag` because its primary use case
+is evaluating GRPO-trained LoRAs (which expect the `<SQL>...</SQL>`
+protocol). Pass `--prompt-mode plain` to baseline a model that wasn't
+trained on the tag format, or set `prompt_mode` per-entry inside a
+`--runs` JSON file. Omitting `--lora-path` switches both the served
+model and the eval `--model` arg to `--base-model`, which is the
+canonical way to establish a no-LoRA baseline against the same dialect
+configs.
 
 ```bash
 # one eval per dialect, 20 questions each, 4 threads

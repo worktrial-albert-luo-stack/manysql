@@ -288,6 +288,53 @@ def test_reconstruct_turns_empty_completion(runtime: DialectRuntime) -> None:
 
 
 # ---------------------------------------------------------------------------
+# <SQL> tag extraction (tag-mode reward path)
+# ---------------------------------------------------------------------------
+
+
+def test_reconstruct_turns_tag_mode_picks_last_sql_block(
+    runtime: DialectRuntime,
+) -> None:
+    """Tag mode: the LAST <SQL>...</SQL> in the reply is the answer.
+
+    A model that drafts SQL inside its reasoning and then commits to a
+    different final query must be scored against the final query, not
+    the draft. This matches ``eval.prompt.extract_sql`` so train and
+    eval extractors agree.
+    """
+    content = (
+        "Let me think. A first draft might be:\n"
+        "<SQL>SELECT 1 FROM nope_invented_table</SQL>\n"
+        "But that table isn't in the schema. The right answer is:\n"
+        "<SQL>SELECT * FROM employees</SQL>"
+    )
+    completion = [{"role": "assistant", "content": content}]
+    turns = reconstruct_turns(completion, runtime)
+    assert len(turns) == 1
+    assert "employees" in turns[0].sql.lower()
+    assert "nope_invented_table" not in turns[0].sql.lower()
+    # The final tag is valid SQL and runs cleanly.
+    assert turns[0].exec_result.success is True
+    assert turns[0].error_class is None
+
+
+def test_reconstruct_turns_tag_mode_tolerates_whitespace_in_tags(
+    runtime: DialectRuntime,
+) -> None:
+    """``< SQL >`` (with internal whitespace) extracts the same as ``<SQL>``.
+
+    The eval-side extractor is whitespace-tolerant; train must match so
+    a model that emits ``< SQL >`` is scored, not silently ignored.
+    """
+    content = "Here's the answer:\n< SQL >SELECT * FROM employees< / SQL >"
+    completion = [{"role": "assistant", "content": content}]
+    turns = reconstruct_turns(completion, runtime)
+    assert len(turns) == 1
+    assert "employees" in turns[0].sql.lower()
+    assert turns[0].exec_result.success is True
+
+
+# ---------------------------------------------------------------------------
 # Reward functions
 # ---------------------------------------------------------------------------
 

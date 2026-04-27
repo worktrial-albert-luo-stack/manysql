@@ -334,6 +334,36 @@ def test_compute_reward_never_parsed_triggers_format_penalty() -> None:
     assert breakdown.total == pytest.approx(-2.0 + -1.0 + -2.0)
 
 
+def test_compute_reward_empty_transcript_matches_parse_error_total() -> None:
+    """Refusal (empty transcript) totals the same as a parse-error attempt.
+
+    Closes the "say nothing and score better than failing" escape hatch:
+    the empty transcript pays the format penalty AND a synthetic parse-
+    error shaping penalty so its total equals the total of an honest
+    one-turn parse-failure attempt. Under GRPO's group-relative
+    advantages this means refusal and parseable-failure are
+    indistinguishable, so the gradient never points at "refuse".
+    """
+    refusal = compute_reward(
+        transcript=[],
+        final_comparison=None,
+        max_turns=3,
+    )
+    parse_attempt = compute_reward(
+        transcript=[_turn(0, matched=False, error_class="parse")],
+        final_comparison=None,
+        max_turns=3,
+    )
+    assert refusal.correctness == 0.0
+    assert refusal.turn_bonus == 0.0
+    assert refusal.error_shaping == pytest.approx(-1.0)  # synthetic parse penalty
+    assert refusal.format_penalty == pytest.approx(-1.0)
+    assert refusal.terminal_penalty == 0.0  # truncation gate needs n_turns > 0
+    assert refusal.total == pytest.approx(-2.0)
+    # The whole point: refusal total <= any honest single-attempt failure.
+    assert refusal.total == pytest.approx(parse_attempt.total)
+
+
 def test_compute_reward_partial_credit_capped() -> None:
     cmp_res = ComparisonResult(
         matches=False,

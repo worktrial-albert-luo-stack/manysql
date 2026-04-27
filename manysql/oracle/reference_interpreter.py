@@ -1158,14 +1158,16 @@ class ReferenceInterpreter(Oracle):
             from datetime import timedelta
             return None if (args[0] is None or args[1] is None) else args[0] - timedelta(days=int(args[1]))
         if name == "DATE_DIFF":
+            # FENCEPOST semantics for calendar units (year/quarter/month):
+            # count boundaries crossed, matching sqlite's STRFTIME-arithmetic
+            # convention used in BIRD gold SQL. Sub-day units use total
+            # elapsed time truncated toward zero.
             unit = args[0] if isinstance(args[0], str) else "day"
             a = args[-2]
             b = args[-1]
             if a is None or b is None:
                 return None
-            if unit.lower() in ("day", "days"):
-                return (b - a).days
-            raise NotImplementedError(f"DATE_DIFF unit: {unit}")
+            return _date_diff(unit.lower(), a, b)
         if name in ("DATE_PART", "EXTRACT"):
             part = str(args[0]).lower()
             d = args[1]
@@ -1233,6 +1235,35 @@ def _date_part(part: str, d: Any) -> Any:
     if part == "second":
         return d.second
     raise NotImplementedError(f"DATE_PART unit: {part}")
+
+
+def _date_diff(unit: str, a: Any, b: Any) -> Any:
+    """``DATE_DIFF(unit, a, b)`` over Python ``date`` / ``datetime`` values.
+
+    Mirrors :meth:`manysql.executor.expr_eval.ExprEvaluator._date_diff`
+    one-for-one so the Polars and reference interpreters agree on every
+    unit. FENCEPOST for calendar units (year/quarter/month).
+    """
+    if unit in ("day", "days"):
+        return (b - a).days
+    if unit in ("week", "weeks"):
+        # Truncate toward zero to match Polars' total_weeks().
+        days = (b - a).days
+        return days // 7 if days >= 0 else -((-days) // 7)
+    if unit in ("month", "months"):
+        return (b.year - a.year) * 12 + (b.month - a.month)
+    if unit in ("quarter", "quarters"):
+        m = (b.year - a.year) * 12 + (b.month - a.month)
+        return m // 3 if m >= 0 else -((-m) // 3)
+    if unit in ("year", "years", "yyyy"):
+        return b.year - a.year
+    if unit in ("hour", "hours"):
+        return int((b - a).total_seconds() // 3600)
+    if unit in ("minute", "minutes"):
+        return int((b - a).total_seconds() // 60)
+    if unit in ("second", "seconds"):
+        return int((b - a).total_seconds())
+    raise NotImplementedError(f"DATE_DIFF unit: {unit}")
 
 
 __all__ = ["ReferenceInterpreter"]

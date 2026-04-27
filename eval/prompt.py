@@ -46,11 +46,20 @@ _BASE_RULES_PLAIN = """\
 """
 
 # Mirrors train.env.trl.TRL_TAG_BASE_RULES so a LoRA trained on that
-# instruction sees a familiar wrapper at eval time.
+# instruction sees a familiar wrapper at eval time. In particular: the
+# "last <SQL>...</SQL> block wins" rule must match training, otherwise
+# a CoT-style model that drafts SQL inside its reasoning gets scored
+# against the wrong tag.
 _BASE_RULES_TAG = """\
 - You will be given a question about the data in the database, and a schema.
-- Generate exactly one SELECT statement (or one WITH ... SELECT). No DDL/DML.
-- Wrap the final SQL between <SQL> and </SQL> tags. Example:
+- You may reason briefly first if it helps: pick the right tables / joins /
+  filters, note edge cases, sketch a draft. Keep the reasoning concise.
+- End your reply with one SELECT (or WITH ... SELECT) wrapped in
+  <SQL>...</SQL> tags. ONLY THE LAST <SQL>...</SQL> BLOCK in your reply
+  is evaluated as your final answer; earlier <SQL>...</SQL> blocks inside
+  your reasoning are ignored, so you can draft and revise without penalty.
+- Example:
+    First I need to count rows in github_events.
     <SQL>SELECT count(*) AS n FROM github_events LIMIT 10</SQL>
 - Add LIMIT to the query when the result could be unbounded; default LIMIT 10.
 - Aliases come AFTER the column expression, e.g. `count(*) AS n`.

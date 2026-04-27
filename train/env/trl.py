@@ -72,9 +72,16 @@ import re
 from typing import TYPE_CHECKING, Any
 
 # Tag used when training without the TRL tools API (single-turn mode).
+# The regex tolerates whitespace inside the tags (``< SQL >``) and is
+# case-insensitive, mirroring ``eval.prompt._SQL_TAG_RE`` so that a
+# completion extracted at training time is identical to one extracted at
+# eval time. Multiple tags in one reply are scored last-wins (see
+# ``_iter_assistant_with_tool_calls``); the system prompt advertises this.
 SQL_TAG_START = "<SQL>"
 SQL_TAG_END = "</SQL>"
-_SQL_TAG_RE = re.compile(r"<SQL>(.*?)</SQL>", re.DOTALL | re.IGNORECASE)
+_SQL_TAG_RE = re.compile(
+    r"<\s*SQL\s*>(.*?)<\s*/\s*SQL\s*>", re.DOTALL | re.IGNORECASE
+)
 
 from eval.validator import compare_results
 from train.env.engine import DialectRuntime
@@ -350,6 +357,13 @@ def _iter_assistant_with_tool_calls(
     Accepts two formats:
     * Structured tool_calls (TRL agent mode with ``tools=``).
     * ``<SQL>...</SQL>`` tag in content (single-turn tag mode, no tools API needed).
+
+    Tag mode picks the **last** ``<SQL>...</SQL>`` block in the reply, not
+    the first. This lets the model think out loud (and even sketch
+    discarded SQL drafts) before committing to a final query without
+    being penalized for the draft. The system prompt advertises this
+    so the policy can rely on it. Matches ``eval.prompt.extract_sql``
+    semantics so train and eval agree on which tag is "the answer".
     """
     out: list[dict[str, Any]] = []
     for turn in completion:
@@ -357,15 +371,17 @@ def _iter_assistant_with_tool_calls(
             continue
         if turn.get("tool_calls"):
             out.append(turn)
-        elif _SQL_TAG_RE.search(turn.get("content") or ""):
-            # Synthesise a fake tool_calls entry so the rest of
-            # reconstruct_turns can stay format-agnostic.
-            sql = _SQL_TAG_RE.search(turn["content"]).group(1).strip()
-            synthetic = dict(turn)
-            synthetic["tool_calls"] = [
-                {"function": {"name": "run_sql", "arguments": {"sql_command": sql}}}
-            ]
-            out.append(synthetic)
+            continue
+        matches = _SQL_TAG_RE.findall(turn.get("content") or "")
+        if not matches:
+            continue
+        # Last tag wins -- see docstring.
+        sql = matches[-1].strip()
+        synthetic = dict(turn)
+        synthetic["tool_calls"] = [
+            {"function": {"name": "run_sql", "arguments": {"sql_command": sql}}}
+        ]
+        out.append(synthetic)
     return out
 
 
@@ -769,12 +785,18 @@ def trl_agent_system_prompt(
 TRL_TAG_BASE_RULES = (
     "- You will be given a question (or a SQL translation request) about the data\n"
     "  in the database, and a schema.\n"
-    "- Write exactly ONE SQL SELECT statement (or WITH ... SELECT) that answers\n"
-    "  the question in the target dialect.\n"
-    "- Wrap the final SQL between <SQL> and </SQL> tags. Example:\n"
-    "    <SQL>SELECT * FROM employees LIMIT 10</SQL>\n"
-    "- Only output SQL that is valid in the described dialect. Do NOT invent columns.\n"
-    "- Use LIMIT when the result could be unbounded; default LIMIT 10.\n"
+    "- You may reason briefly first if it helps: pick the right tables / joins /\n"
+    "  filters, note edge cases, sketch a draft. Keep the reasoning concise --\n"
+    "  the SQL is what gets scored.\n"
+    "- End your reply with one SELECT (or WITH ... SELECT) wrapped in\n"
+    "  <SQL>...</SQL> tags. ONLY THE LAST <SQL>...</SQL> BLOCK in your reply\n"
+    "  is evaluated as your final answer; earlier <SQL>...</SQL> blocks inside\n"
+    "  your reasoning are ignored, so you can draft and revise without penalty.\n"
+    "- Example:\n"
+    "    First I need orders joined to customers on customer_id, grouped by region.\n"
+    "    <SQL>SELECT region, count(*) AS n FROM orders o JOIN customers c ON o.cid = c.id GROUP BY region LIMIT 10</SQL>\n"
+    "- Use only columns that appear in the schema. Do NOT invent columns.\n"
+    "- Add LIMIT when the result could be unbounded; default LIMIT 10.\n"
 )
 
 

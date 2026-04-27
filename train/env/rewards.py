@@ -113,8 +113,11 @@ class RewardConfig:
 
     # ---------- terminal penalties (both modes) ----------
     # Format penalty: applied once if the agent never produced a
-    # parseable query AT ANY turn. Discourages catastrophic format
-    # collapse / total grammar failure.
+    # parseable query AT ANY turn -- including the degenerate case
+    # where the agent didn't emit a <SQL> tag / tool call at all
+    # (transcript length 0). Discourages catastrophic format collapse
+    # AND closes the "refuse the task to avoid penalties" escape
+    # hatch.
     never_parsed_penalty: float = -1.0
     # Terminal-invalid penalty: applied when the episode hits the
     # turn budget AND the final turn was a parse / empty error. The
@@ -184,8 +187,10 @@ def compute_reward(
 
     Args:
         transcript: every turn the agent took, in order. Empty list
-            means the agent didn't even reach a single env.step()
-            (treat as worst case: no correctness, full format penalty).
+            means the agent never emitted a parseable SQL action (no
+            <SQL> tag / no tool call). That is treated as a refusal:
+            no correctness, no error shaping, and the full format
+            penalty fires.
         final_comparison: row-match comparison against gold rows for
             the FINAL turn's exec result, or None if the final turn
             errored out (in which case correctness = 0).
@@ -247,9 +252,25 @@ def compute_reward(
             error_shaping += cfg.unmatched_penalty
             parsed_at_least_once = True
 
-    # ---- format penalty: catastrophic collapse only ----
+    # Refusal accounting. An empty transcript means the agent never
+    # produced an actionable SQL action at all (no <SQL> tag, no tool
+    # call). Structurally that's a non-attempt, which we charge as
+    # equivalent to a parse-error attempt for shaping purposes. Without
+    # this, refusal would total -1.0 (just the format penalty below)
+    # while a parse-error attempt totals -2.0 (parse shaping + format
+    # penalty), and GRPO's group-relative advantage would systematically
+    # prefer "say nothing" over "try and fail to parse" -- a degenerate
+    # local optimum the model can collapse into early in training.
+    if n_turns == 0:
+        error_shaping += cfg.parse_error_penalty
+
+    # ---- format penalty: catastrophic collapse ----
+    # Fires whenever the agent never emitted a parseable SQL, including
+    # the degenerate ``n_turns == 0`` case (no <SQL> tag / no tool call
+    # at all). Stacks with the refusal-shaping penalty above so refusing
+    # is never strictly better than honestly attempting and failing.
     format_penalty = 0.0
-    if n_turns > 0 and not parsed_at_least_once:
+    if not parsed_at_least_once:
         format_penalty = cfg.never_parsed_penalty
 
     # ---- terminal-invalid penalty: regressed at the budget ----

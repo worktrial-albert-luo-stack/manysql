@@ -80,6 +80,9 @@ from train.env import (
     make_run_sql_tool, make_reward_funcs, reconstruct_turns,
     score_completion, tasks_to_dataset, trl_agent_system_prompt,
 )
+# Single-turn tag mode lives in train.env.trl (not re-exported, since
+# it's a niche path used mainly by train/grpo_sql.py):
+from train.env.trl import trl_tag_system_prompt, TRL_TAG_BASE_RULES
 ```
 
 ## Quick start
@@ -427,14 +430,69 @@ so each component shows up as its own metric in W&B/whatever.
 
 ## Plugging into TRL `GRPOTrainer` (Unsloth)
 
-TRL's recent `GRPOTrainer` ships first-class agent / multi-turn support
-via `tools=[...]`: the trainer drives the rollout loop, vLLM does the
-generation, and the model interleaves `tool_calls` with `tool` results
-until it stops. We don't run `SqlEnv` during training — the trainer
-owns the rollout — but every other piece of `train.env` carries over
-unchanged. The bridge module is `train/env/trl.py`; the end-to-end
-training script is `train/grpo_sql.py` (see also `--dry-run` for a
-CPU-only smoke test).
+`train/env/trl.py` exposes two GRPO interfaces; pick the one whose TRL
+version + rollout style fits your setup. Both paths share the *same*
+reward functions, the *same* dataset shape, and the *same* per-row
+`dialect`-column dispatch — they only differ in how the model is asked
+to surface its SQL.
+
+| Mode | What the model emits | TRL requirement | Used by |
+| --- | --- | --- | --- |
+| **Single-turn tag** (default) | One assistant message containing `<SQL>...</SQL>`. No tools API; vLLM just generates a string. | Works on `trl <= 0.25.x` and modern TRL alike — no `tools=` parameter needed. | `train/grpo_sql.py` (the shipped end-to-end trainer). |
+| **Multi-turn agent** | TRL drives `tool_calls` ↔ `tool` results until the model stops; the env exposes `run_sql(sql_command)` (and `dialect` in multi-dialect mode). | TRL with first-class `tools=[...]` agent support (recent versions). | Custom trainers that want execution feedback inside the rollout. |
+
+In neither mode do we run `SqlEnv` at training time — the trainer owns
+the rollout, and `SqlEnv` / `LLMPolicy` / `run_episode` stay reserved
+for offline eval, CLI smoke tests, and reward-shaping debugging.
+
+### Single-turn tag mode (default for `train/grpo_sql.py`)
+
+```python
+from train.env.trl import (
+    tasks_to_dataset, trl_tag_system_prompt, make_reward_funcs,
+)
+from train.env import (
+    DialectRuntime, GoldenTaskGenerator, GoldenTaskConfig, RewardConfig,
+)
+
+gen = GoldenTaskGenerator(GoldenTaskConfig(target_dialect="aggressive_alien"))
+gen.build()
+runtime = DialectRuntime(dialect="aggressive_alien", catalog=gen.catalog)
+runtime.setup()
+
+# System prompt instructs the model to wrap its final SQL between
+# <SQL> and </SQL>; the reward function pulls SQL out of the tag
+# (or out of a tool_calls turn, transparently) and re-executes it.
+ds = tasks_to_dataset(
+    tasks=gen.all_tasks(),
+    runtime=runtime,
+    system_prompt=trl_tag_system_prompt(runtime),
+    tokenizer=tokenizer,
+    max_prompt_tokens=2048,
+)
+
+reward_funcs = make_reward_funcs(
+    runtimes=runtime,
+    reward_config=RewardConfig.discounted(discount_factor=0.9),
+    max_turns=5,
+)
+
+trainer = GRPOTrainer(
+    model=model, processing_class=tokenizer,
+    train_dataset=ds, reward_funcs=reward_funcs,
+    args=grpo_config,
+)
+trainer.train()
+```
+
+When evaluating the resulting LoRA, pass `--prompt-mode tag` to
+`manysql-eval` (or use `manysql-serve-eval`, which defaults to it) so
+the eval-time system prompt matches what the model trained on.
+`extract_sql` is tag-aware in either mode, so a tag-trained model
+running under plain prompts is still scored correctly — it's just
+that the prompt would contradict what was trained.
+
+### Multi-turn agent mode (TRL `tools=[...]`)
 
 Three adapter pieces wire into the trainer:
 

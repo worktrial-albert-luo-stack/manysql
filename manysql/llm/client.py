@@ -241,7 +241,21 @@ class LLMClient:
                         f"HTTP {resp.status_code} from {self.config.backend.value}: "
                         f"{resp.text[:500]}"
                     )
-                return parse(resp.json(), self.config.backend)
+                # httpx.Response.json() does a strict json.loads on the
+                # full body; under high concurrency OpenRouter sometimes
+                # returns truncated bodies, SSE keep-alive frames, or
+                # HTML error pages with a 200, all of which surface as
+                # json.JSONDecodeError. Treat that as a retryable LLMError
+                # rather than letting it bubble up uncaught.
+                try:
+                    body = resp.json()
+                except json.JSONDecodeError as exc:
+                    raise LLMError(
+                        f"HTTP body was not JSON (status={resp.status_code}, "
+                        f"len={len(resp.text)}): {exc}; "
+                        f"body[:300]={resp.text[:300]!r}"
+                    ) from exc
+                return parse(body, self.config.backend)
             except (httpx.RequestError, LLMError) as exc:
                 last_error = exc
                 if attempt == self.config.max_retries - 1:

@@ -126,3 +126,90 @@ def test_real_client_close_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> Non
     client = LLMClient.from_env()
     client.close()
     client.close()  # should not raise
+
+
+# Regression: a malformed HTTP body (truncated, HTML, SSE keep-alive,
+# etc.) used to surface as an uncaught json.JSONDecodeError because the
+# retry loop only caught httpx.RequestError + LLMError. We now wrap the
+# body decode and recover via the existing retry path.
+
+class _FakeHTTPResponse:
+    def __init__(self, *, status: int, body: str, json_payload: object = None) -> None:
+        self.status_code = status
+        self.text = body
+        self._json_payload = json_payload
+
+    def json(self) -> object:
+        if self._json_payload is None:
+            # Mimic httpx behavior: strict json.loads on the body.
+            return json.loads(self.text)
+        return self._json_payload
+
+
+class _FakeHTTPClient:
+    """Replays a queued list of (response | exception) on each .post()."""
+
+    def __init__(self, responses: list[object]) -> None:
+        self._responses = list(responses)
+        self.calls = 0
+
+    def post(self, *args: object, **kwargs: object) -> _FakeHTTPResponse:
+        self.calls += 1
+        item = self._responses.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return item  # type: ignore[return-value]
+
+    def close(self) -> None:
+        pass
+
+
+def _real_client(monkeypatch: pytest.MonkeyPatch) -> LLMClient:
+    monkeypatch.setattr(
+        "manysql.llm.client._maybe_load_dotenv", lambda: None, raising=True
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("MANYSQL_LLM_BACKEND", "openai")
+    cfg = LLMConfig.from_env()
+    # Speed up the backoff so the test runs in milliseconds.
+    cfg = LLMConfig(
+        backend=cfg.backend,
+        api_key=cfg.api_key,
+        base_url=cfg.base_url,
+        default_model=cfg.default_model,
+        max_retries=3,
+        retry_backoff_seconds=0.0,
+    )
+    return LLMClient(cfg)
+
+
+def test_chat_retries_on_malformed_http_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Truncated/HTML body on attempt 1 retries and succeeds on attempt 2."""
+    good_payload = {
+        "choices": [{"message": {"content": "hi"}}],
+        "model": "x",
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    bad = _FakeHTTPResponse(status=200, body="<html>upstream timeout</html>")
+    good = _FakeHTTPResponse(status=200, body="{}", json_payload=good_payload)
+    client = _real_client(monkeypatch)
+    client._client = _FakeHTTPClient([bad, good])  # type: ignore[assignment]
+    resp = client.chat(user="hi")
+    assert resp.text == "hi"
+    assert client._client.calls == 2  # type: ignore[attr-defined]
+
+
+def test_chat_raises_llmerror_when_all_attempts_yield_bad_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bad = _FakeHTTPResponse(status=200, body="not-json-at-all")
+    client = _real_client(monkeypatch)
+    client._client = _FakeHTTPClient([bad, bad, bad])  # type: ignore[assignment]
+    with pytest.raises(LLMError) as ei:
+        client.chat(user="hi")
+    # The wrapped error mentions both the cause and a body preview.
+    msg = str(ei.value)
+    assert "HTTP body was not JSON" in msg or "body was not JSON" in msg or "after 3 attempts" in msg
+    assert client._client.calls == 3  # type: ignore[attr-defined]

@@ -669,13 +669,27 @@ def tasks_to_dataset(
         sys_prompt = runtime.system_prompt()
     else:
         sys_prompt = system_prompt
+
+    # Multimodal processors (e.g. Gemma3) iterate over message["content"]
+    # as a list of typed parts and crash on plain strings. Plain text
+    # tokenizers (Qwen3 etc.) want a string. Detect once and route.
+    _is_multimodal = tokenizer is not None and (
+        hasattr(tokenizer, "image_processor")
+        or type(tokenizer).__name__.endswith("Processor")
+    )
+
+    def _content(text: str) -> Any:
+        if _is_multimodal:
+            return [{"type": "text", "text": text}]
+        return text
+
     rows: list[dict[str, Any]] = []
     for task in tasks:
         rows.append(
             {
                 "prompt": [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": task.prompt},
+                    {"role": "system", "content": _content(sys_prompt)},
+                    {"role": "user", "content": _content(task.prompt)},
                 ],
                 "task_id": task.meta.task_id,
                 "dialect": task.meta.dialect,
@@ -698,15 +712,36 @@ def tasks_to_dataset(
     ds = Dataset.from_list(rows)
 
     if tokenizer is not None and max_prompt_tokens is not None:
-        def _len(row: dict[str, Any]) -> int:
-            return len(
-                tokenizer.apply_chat_template(
-                    row["prompt"], add_generation_prompt=True, tokenize=True
-                )
-            )
-
-        ds = ds.filter(lambda r: _len(r) <= max_prompt_tokens)
+        ds = ds.filter(
+            lambda r: count_prompt_tokens(tokenizer, r["prompt"]) <= max_prompt_tokens
+        )
     return ds
+
+
+def count_prompt_tokens(tokenizer: Any, prompt: list[dict[str, Any]]) -> int:
+    """Tokenize a chat-form prompt and return the token count.
+
+    Plain text tokenizers return a list of ints from
+    ``apply_chat_template(tokenize=True)`` -- ``len()`` works directly.
+    Multimodal processors (Gemma3 etc.) return a ``BatchEncoding``, where
+    ``len()`` is the number of dict keys, not the token count. Render to
+    text first and re-tokenize through the inner text tokenizer to get a
+    correct count in both cases.
+    """
+    is_multimodal = hasattr(tokenizer, "image_processor") or type(
+        tokenizer
+    ).__name__.endswith("Processor")
+    if not is_multimodal:
+        return len(
+            tokenizer.apply_chat_template(
+                prompt, add_generation_prompt=True, tokenize=True
+            )
+        )
+    text = tokenizer.apply_chat_template(
+        prompt, add_generation_prompt=True, tokenize=False
+    )
+    inner = getattr(tokenizer, "tokenizer", tokenizer)
+    return len(inner(text, add_special_tokens=False)["input_ids"])
 
 
 def _json_default(o: Any) -> str:
@@ -819,6 +854,7 @@ __all__ = [
     "SQL_TAG_START",
     "TRL_AGENT_BASE_RULES",
     "TRL_TAG_BASE_RULES",
+    "count_prompt_tokens",
     "make_reward_funcs",
     "make_run_sql_tool",
     "reconstruct_turns",

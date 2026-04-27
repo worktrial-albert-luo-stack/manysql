@@ -630,7 +630,10 @@ class SynSqlCatalog(CatalogProvider):
                 scanned += 1
                 if scanned <= self.start_index:
                     continue
-                cx = item.get("sql_complexity") or "simple"
+                # The HF data.json stores capitalized values
+                # ('Simple'/'Moderate'/'Complex'/'Highly Complex') but our
+                # filter API and _VALID_COMPLEXITIES use lowercase. Normalize.
+                cx = (item.get("sql_complexity") or "simple").lower()
                 if self.complexities and cx not in self.complexities:
                     continue
                 # Stamp the absolute item index for reproducibility +

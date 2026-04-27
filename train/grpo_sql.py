@@ -214,12 +214,19 @@ class TrainArgs:
     max_turns: int = 5
     # ---- trainer ----
     learning_rate: float = 5e-6
+    lr_scheduler_type: str = "linear"
     num_generations: int = 4
+    grad_accum: int = 1
     max_steps: int = 200
     save_steps: int = 100
     output_dir: str = "outputs/grpo_qwen3_4b_sql"
     seed: int = 3407
     dry_run: bool = False
+    # ---- curriculum filter ----
+    curriculum_filter: bool = False
+    curriculum_rollouts: int = 4
+    curriculum_temperature: float = 1.6
+    curriculum_batch_size: int = 16
     # ---- logging ----
     wandb_project: str = "manysql-grpo"
     wandb_run_name: str | None = None
@@ -494,7 +501,14 @@ def parse_args() -> TrainArgs:
         help="Tool-call cap per completion considered for scoring.",
     )
     p.add_argument("--learning-rate", type=float, default=defaults.learning_rate)
+    p.add_argument(
+        "--lr-scheduler-type",
+        default=defaults.lr_scheduler_type,
+        choices=["linear", "cosine", "constant", "constant_with_warmup"],
+        help="HF Trainer lr scheduler. linear (default) decays to 0 by max_steps; cosine holds higher LR longer.",
+    )
     p.add_argument("--num-generations", type=int, default=defaults.num_generations)
+    p.add_argument("--grad-accum", type=int, default=defaults.grad_accum)
     p.add_argument("--max-steps", type=int, default=defaults.max_steps)
     p.add_argument("--save-steps", type=int, default=defaults.save_steps)
     p.add_argument("--output-dir", default=defaults.output_dir)
@@ -507,6 +521,38 @@ def parse_args() -> TrainArgs:
     p.add_argument("--wandb-project", default=defaults.wandb_project)
     p.add_argument("--wandb-run-name", default=defaults.wandb_run_name)
     p.add_argument("--no-wandb", action="store_true")
+    p.add_argument(
+        "--curriculum-filter",
+        action="store_true",
+        help=(
+            "Before training, run --curriculum-rollouts base-model "
+            "rollouts per prompt and drop prompts whose rollouts all "
+            "score the same correctness (all-perfect or all-failed "
+            "groups have zero GRPO advantage and waste step budget)."
+        ),
+    )
+    p.add_argument(
+        "--curriculum-rollouts",
+        type=int,
+        default=defaults.curriculum_rollouts,
+        help=(
+            "Rollouts per prompt during the curriculum filter pass. "
+            "Higher = more reliable variance detection at higher cost. "
+            "Default 4 mirrors the GRPO group size."
+        ),
+    )
+    p.add_argument(
+        "--curriculum-temperature",
+        type=float,
+        default=defaults.curriculum_temperature,
+        help="Sampling temperature for the curriculum filter rollouts.",
+    )
+    p.add_argument(
+        "--curriculum-batch-size",
+        type=int,
+        default=defaults.curriculum_batch_size,
+        help="vLLM batch size during the curriculum filter pass.",
+    )
     ns = p.parse_args()
     parsed = vars(ns)
     parsed["dialects"] = _split_csv(parsed["dialects"])
@@ -985,14 +1031,8 @@ def main() -> None:
     train_ds = build_dataset(args, runtimes, tasks, tokenizer=tokenizer)
     print(f"[grpo] kept {len(train_ds)} examples after length filter")
 
-    prompt_lens = [
-        len(
-            tokenizer.apply_chat_template(
-                r["prompt"], add_generation_prompt=True, tokenize=True
-            )
-        )
-        for r in train_ds
-    ]
+    from train.env.trl import count_prompt_tokens  # noqa: PLC0415
+    prompt_lens = [count_prompt_tokens(tokenizer, r["prompt"]) for r in train_ds]
     max_prompt_length = max(prompt_lens) + 1
     max_completion_length = args.max_seq_length - max_prompt_length
     if max_completion_length <= 256:
@@ -1001,6 +1041,47 @@ def main() -> None:
             f"multi-turn rollouts; raise --max-seq-length "
             f"(currently {args.max_seq_length})"
         )
+
+    if args.curriculum_filter:
+        from train.env.curriculum import (  # noqa: PLC0415
+            filter_dataset_by_rollout_variance,
+        )
+
+        print(
+            f"[curriculum] running rollout filter: "
+            f"{args.curriculum_rollouts} rollouts/prompt, "
+            f"temp={args.curriculum_temperature}, "
+            f"batch_size={args.curriculum_batch_size}"
+        )
+        curriculum_sp = SamplingParams(
+            n=args.curriculum_rollouts,
+            temperature=args.curriculum_temperature,
+            min_p=0.1,
+            top_p=1.0,
+            top_k=-1,
+            max_tokens=max_completion_length,
+            seed=args.seed,
+            stop=[tokenizer.eos_token],
+            include_stop_str_in_output=True,
+        )
+        train_ds = filter_dataset_by_rollout_variance(
+            train_ds,
+            model=model,
+            tokenizer=tokenizer,
+            runtimes=runtimes,
+            sampling_params=curriculum_sp,
+            batch_size=args.curriculum_batch_size,
+        )
+        if len(train_ds) == 0:
+            raise RuntimeError(
+                "[curriculum] filter dropped every prompt; nothing to "
+                "train on. Try a different model, lower temperature, or "
+                "more --curriculum-rollouts to reduce false-positives."
+            )
+        # Re-compute prompt-length stats for the trainer's max_prompt_length.
+        prompt_lens = [count_prompt_tokens(tokenizer, r["prompt"]) for r in train_ds]
+        max_prompt_length = max(prompt_lens) + 1
+        max_completion_length = args.max_seq_length - max_prompt_length
 
     vllm_sampling_params = SamplingParams(
         min_p=0.1,
@@ -1013,17 +1094,20 @@ def main() -> None:
 
     grpo_config = GRPOConfig(
         vllm_sampling_params=vllm_sampling_params,
-        temperature=1.0,
+        # 1.4 saturated: ~40% of groups had identical rewards across all
+        # 4 generations (zero advantage, zero gradient). 1.6 trades some
+        # token-level coherence for wider within-group spread.
+        temperature=1.6,
         learning_rate=args.learning_rate,
         weight_decay=0.001,
         warmup_ratio=0.1,
-        lr_scheduler_type="linear",
+        lr_scheduler_type=args.lr_scheduler_type,
         optim="adamw_8bit",
         logging_steps=1,
         # trl 0.22 requires generation_batch_size (per_device_train_batch_size *
         # gradient_accumulation_steps) to be divisible by num_generations.
         per_device_train_batch_size=args.num_generations,
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=args.grad_accum,
         num_generations=args.num_generations,
         max_prompt_length=max_prompt_length,
         max_completion_length=max_completion_length,

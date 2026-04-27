@@ -583,7 +583,20 @@ def main(argv: list[str] | None = None) -> int:
     # model. When a LoRA *is* given, the LoRA module name (registered via
     # --lora-modules <name>=<path>) is what clients must send.
     if args.lora_path is not None:
-        model_id = args.lora_name or args.lora_path.resolve().name
+        if args.lora_name:
+            model_id = args.lora_name
+        else:
+            # Auto-derive a unique-ish id. The conventional layout is
+            # ``<run_dir>/lora`` (final adapter) or
+            # ``<run_dir>/checkpoint-NNN`` (intermediate), so two runs
+            # would otherwise collide on ``lora`` and overwrite each
+            # other's eval result file. Walk up to the run dir when
+            # the leaf name is generic.
+            path = args.lora_path.resolve()
+            if path.name in {"lora", "adapter"} or path.name.startswith("checkpoint-"):
+                model_id = f"{path.parent.name}_{path.name}"
+            else:
+                model_id = path.name
     else:
         if args.lora_name:
             print(

@@ -1,0 +1,110 @@
+# Qwen3-4B-Instruct GRPO runs — 2026-04-27 session.
+# All use the (a+b+c) hyperparam set: --num-generations 6, --lr-scheduler-type
+# cosine, --max-steps 500. Outputs go to /workspace because the local /tmp
+# overlay has a per-pod quota that's too tight for multiple checkpoints.
+#
+# Inherited defaults (set in train/grpo_sql.py:TrainArgs):
+#   model_name      : unsloth/Qwen3-4B-Instruct-2507
+#   lora_rank       : 32
+#   load_in_4bit    : true
+#   learning_rate   : 5e-6
+#   grad_accum      : 1
+#   coverage_mode   : partition
+#   temperature     : 1.6 (hardcoded in grpo_sql.py:GRPOConfig)
+#   wikisql_size    : 1000  (~631 tasks survive the length filter)
+#   synsql_size     : 1000  (~440 tasks survive the complexity filter; lowercase
+#                            normalization fix in train/env/synsql.py:633)
+#   synsql_complexity: simple,moderate
+#   bird_size       : 1000
+#   save_steps      : 100   (overridden to 250 below to ease disk pressure)
+#
+# Launch from /workspace/manysql. The launcher cd's into /tmp before exec'ing,
+# so absolute --output-dir paths are required to land outside the small overlay.
+
+##############################################################################
+# 1.  Wikisql, 1-dialect (snowflake_clone)        ← BEST EVAL: 28/50, 62% 1st-attempt
+##############################################################################
+
+CUDA_VISIBLE_DEVICES=3 nohup bash train/run_grpo_sql.sh \
+    --generator wikisql \
+    --dialects snowflake_clone \
+    --max-steps 500 --num-generations 6 --lr-scheduler-type cosine \
+    --save-steps 250 \
+    --no-wandb \
+    --output-dir /workspace/manysql/outputs/grpo_qwen3_4b_sql_wikisql_snowflake_abc_v2 \
+    > /tmp/grpo_wikisql_qwen3_snowflake_abc_v2.log 2>&1 &
+
+##############################################################################
+# 2.  Wikisql, 10-dialect (snowflake_clone + 9 most-recent dialects)
+#     Top-10 most-recently-added dialects, by `git log --diff-filter=A` order.
+##############################################################################
+
+CUDA_VISIBLE_DEVICES=5 nohup bash train/run_grpo_sql.sh \
+    --generator wikisql \
+    --dialects snowflake_clone,sqlite_clone,bigmaria_pivot,bqserver_qualify_filter,mariflake_comma_semi,mydb2_rollup,mysqlite_upsert,orashift_merge,pgserver_schema_ns,redgres_lateral \
+    --max-steps 500 --num-generations 6 --lr-scheduler-type cosine \
+    --save-steps 250 \
+    --no-wandb \
+    --output-dir /workspace/manysql/outputs/grpo_qwen3_4b_sql_wikisql_10dialects_abc_v2 \
+    > /tmp/grpo_wikisql_qwen3_10dialects_abc_v2.log 2>&1 &
+
+##############################################################################
+# 3.  Synsql, 1-dialect (snowflake_clone)
+#     --max-seq-length 6144 because synsql prompts (multi-table schemas + sample
+#     rows + dialect card) routinely exceed the default 4096 cap. The training
+#     reached step 500 but the final adapter save crashed on the /workspace
+#     quota — only checkpoint-250 survived. Eval results from the half-trained
+#     adapter: 27/50, 64% first-attempt.
+##############################################################################
+
+CUDA_VISIBLE_DEVICES=6 nohup bash train/run_grpo_sql.sh \
+    --generator synsql \
+    --dialects snowflake_clone \
+    --max-steps 500 --num-generations 6 --lr-scheduler-type cosine \
+    --save-steps 250 \
+    --max-seq-length 6144 \
+    --no-wandb \
+    --output-dir /workspace/manysql/outputs/grpo_qwen3_4b_sql_synsql_snowflake_abc \
+    > /tmp/grpo_synsql_qwen3_snowflake_abc.log 2>&1 &
+
+##############################################################################
+# 4.  Synsql, 10-dialect (same dialect set as run 2)
+#     Same disk-quota save crash as run 3 — only checkpoint-250 saved. Eval
+#     results from the half-trained adapter: 23/50, 60% first-attempt (the
+#     only LoRA in the session that scored below the base model — possibly
+#     because synsql is harder per-dialect and 10x dilution dropped below the
+#     transfer threshold; worth re-running to step 500 with a fresh quota).
+##############################################################################
+
+CUDA_VISIBLE_DEVICES=7 nohup bash train/run_grpo_sql.sh \
+    --generator synsql \
+    --dialects snowflake_clone,sqlite_clone,bigmaria_pivot,bqserver_qualify_filter,mariflake_comma_semi,mydb2_rollup,mysqlite_upsert,orashift_merge,pgserver_schema_ns,redgres_lateral \
+    --max-steps 500 --num-generations 6 --lr-scheduler-type cosine \
+    --save-steps 250 \
+    --max-seq-length 6144 \
+    --no-wandb \
+    --output-dir /workspace/manysql/outputs/grpo_qwen3_4b_sql_synsql_10dialects_abc \
+    > /tmp/grpo_synsql_qwen3_10dialects_abc.log 2>&1 &
+
+##############################################################################
+# Eval: serve LoRA + base, run 50-question synthetic backend.
+# Notes from this session that bit us before they worked:
+#   - HF_HOME=/tmp/hf-home so the model is read from the existing cache (the
+#     /workspace cache hits the same per-pod quota the training outputs do).
+#   - --base-model Qwen/Qwen3-4B-Instruct-2507 (upstream Qwen). Same weights
+#     as unsloth/Qwen3-4B-Instruct-2507; this name is what's already cached.
+#   - PATH=/tmp/venv-gpu/bin:$PATH so subprocess.Popen finds vllm.
+#   - --max-model-len 8192 because eval prompts can hit ~2k input + 2k output
+#     budget, overflowing the default 4096.
+#   - --vllm-extra='--max-lora-rank 32' because vLLM defaults max_lora_rank to
+#     16 and rejects rank-32 LoRAs.
+
+CUDA_VISIBLE_DEVICES=0 HF_HOME=/tmp/hf-home PATH=/tmp/venv-gpu/bin:$PATH \
+nohup /tmp/venv-gpu/bin/python -m eval.serve_lora \
+    --base-model Qwen/Qwen3-4B-Instruct-2507 \
+    --lora-path /workspace/manysql/outputs/grpo_qwen3_4b_sql_wikisql_snowflake_abc_v2/lora \
+    --port 8100 \
+    --max-model-len 8192 \
+    --vllm-extra="--max-lora-rank 32" \
+    --dialects snowflake_clone --backend synthetic --concurrency 4 \
+    > /tmp/eval_wikisql_1d_v2.log 2>&1 &

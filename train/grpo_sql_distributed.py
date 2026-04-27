@@ -165,6 +165,16 @@ class DistributedTrainArgs:
     wikisql_split: str = "train"
     wikisql_seed: int = 0
     wikisql_sample_rows: int = 3
+    # BIRD-SQL knobs (only used with --generator bird)
+    bird_size: int = 1000
+    bird_split: str = "train"
+    bird_seed: int = 0
+    bird_sample_rows: int = 3
+    bird_difficulty: str = "simple,moderate"
+    bird_db_dir: str | None = None
+    bird_no_download: bool = False
+    bird_max_db_bytes: int = 500 * 1024 * 1024
+    bird_max_rows_per_table: int = 200_000
     # ---- rewards ----
     reward_mode: str = "discounted"
     discount_factor: float = 0.9
@@ -180,9 +190,11 @@ class DistributedTrainArgs:
     output_dir: str = "outputs/grpo_qwen3_4b_sql_ddp"
     seed: int = 3407
     dry_run: bool = False
-    # ---- vLLM rollout (trl 0.22 split mode) ----
+    # ---- vLLM rollout (trl 0.22 colocate mode) ----
+    # trl 0.22 ignores --vllm-device and colocates vLLM on every rank.
+    # Util > 0.5 OOMs the trainer (Qwen3-4B + LoRA + grad ckpt on H100 80GB).
     vllm_device: str = "auto"  # 'auto' = pick last visible GPU
-    vllm_gpu_memory_utilization: float = 0.85
+    vllm_gpu_memory_utilization: float = 0.4
     vllm_max_model_len: int | None = None  # default: trainer.max_seq_length
     vllm_dtype: str = "auto"
     # ---- logging ----
@@ -239,12 +251,14 @@ def parse_args() -> DistributedTrainArgs:
     p.add_argument(
         "--generator",
         default=defaults.generator,
-        choices=["golden", "eval_suite", "wikisql"],
+        choices=["golden", "eval_suite", "wikisql", "bird"],
         help=(
             "Task source. golden = cross-dialect translation on the "
             "5-table manysql catalog; eval_suite = NL->SQL benchmark "
             "questions on github_events; wikisql = NL->SQL on Wikipedia "
-            "tables (use --wikisql-size to subset)."
+            "tables (use --wikisql-size to subset); bird = NL->SQL on "
+            "multi-table BIRD-SQL databases (use --bird-size; downloads "
+            "~5GB of SQLite DBs on first run)."
         ),
     )
     p.add_argument(
@@ -270,6 +284,52 @@ def parse_args() -> DistributedTrainArgs:
         type=int,
         default=defaults.wikisql_sample_rows,
         help="How many sample rows to embed in each WikiSQL user prompt.",
+    )
+    # BIRD-SQL knobs
+    p.add_argument(
+        "--bird-size",
+        type=int,
+        default=defaults.bird_size,
+        help="Number of BIRD examples to sample (only with --generator=bird).",
+    )
+    p.add_argument(
+        "--bird-split",
+        default=defaults.bird_split,
+        choices=["train", "dev"],
+    )
+    p.add_argument("--bird-seed", type=int, default=defaults.bird_seed)
+    p.add_argument(
+        "--bird-sample-rows",
+        type=int,
+        default=defaults.bird_sample_rows,
+        help="How many sample rows to embed in each BIRD user prompt.",
+    )
+    p.add_argument(
+        "--bird-difficulty",
+        default=defaults.bird_difficulty,
+        help="Comma-separated BIRD difficulty filter (simple,moderate,challenging).",
+    )
+    p.add_argument(
+        "--bird-db-dir",
+        default=defaults.bird_db_dir,
+        help="Override the BIRD DB directory (else autodetect/auto-download).",
+    )
+    p.add_argument(
+        "--bird-no-download",
+        action="store_true",
+        help="Disable auto-download of the BIRD train zip.",
+    )
+    p.add_argument(
+        "--bird-max-db-bytes",
+        type=int,
+        default=defaults.bird_max_db_bytes,
+        help="Skip BIRD .sqlite files larger than this (0 = no cap).",
+    )
+    p.add_argument(
+        "--bird-max-rows-per-table",
+        type=int,
+        default=defaults.bird_max_rows_per_table,
+        help="Cap BIRD source tables to this many rows (0 = no cap).",
     )
     # ---- rewards ----
     p.add_argument(
@@ -440,7 +500,12 @@ def main() -> None:
 
     import torch  # noqa: PLC0415
     from peft import LoraConfig  # noqa: PLC0415
-    from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: PLC0415
+    from transformers import (  # noqa: PLC0415
+        AutoConfig,
+        AutoModelForCausalLM,
+        AutoModelForImageTextToText,
+        AutoTokenizer,
+    )
     from trl import GRPOConfig, GRPOTrainer  # noqa: PLC0415
 
     vllm_device = _resolve_vllm_device(args.vllm_device)
@@ -491,7 +556,21 @@ def main() -> None:
             bnb_4bit_use_double_quant=True,
         )
 
-    model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
+    # Gemma 3 4B/12B/27B ship as multimodal (Gemma3ForConditionalGeneration);
+    # AutoModelForCausalLM can't dispatch to those. Detect via config and
+    # load via AutoModelForImageTextToText, then keep just the text decoder
+    # (model.language_model) as the trainable. Qwen / text-only Gemma 3 1B
+    # / etc. still take the AutoModelForCausalLM path unchanged.
+    cfg = AutoConfig.from_pretrained(args.model_name, trust_remote_code=True)
+    archs = list(getattr(cfg, "architectures", []) or [])
+    is_vlm = any(a.endswith("ForConditionalGeneration") for a in archs)
+    if is_vlm:
+        wrapper = AutoModelForImageTextToText.from_pretrained(
+            args.model_name, **model_kwargs
+        )
+        model = getattr(wrapper, "language_model", None) or wrapper
+    else:
+        model = AutoModelForCausalLM.from_pretrained(args.model_name, **model_kwargs)
 
     if args.load_in_4bit:
         from peft import prepare_model_for_kbit_training  # noqa: PLC0415
@@ -582,12 +661,15 @@ def main() -> None:
             {"use_reentrant": False} if args.gradient_checkpointing else None
         ),
         ddp_find_unused_parameters=False,
-        # ---- vLLM rollout (trl 0.22 split mode) ----
+        # ---- vLLM rollout (trl 0.22 colocate mode) ----
+        # trl 0.22 dropped vllm_device / vllm_max_model_len / vllm_dtype;
+        # only vllm_mode (colocate|server) + vllm_gpu_memory_utilization
+        # are exposed. In colocate, rank 0 hosts the vllm engine on its
+        # own GPU and broadcasts to other ranks. The dedicated last GPU
+        # the launcher reserves goes unused under this mode.
         use_vllm=True,
-        vllm_device=vllm_device,
+        vllm_mode="colocate",
         vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
-        vllm_max_model_len=vllm_max_model_len,
-        vllm_dtype=args.vllm_dtype,
         # ---- bookkeeping ----
         report_to=report_to,
         run_name=os.environ.get("WANDB_NAME") if report_to == "wandb" else None,

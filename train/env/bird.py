@@ -69,6 +69,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -467,11 +468,19 @@ class BirdCatalog(CatalogProvider):
 
         ds = load_dataset(ds_name, split=split_name)
         rows: list[dict[str, Any]] = []
-        for r in ds:
+        for idx, r in enumerate(ds):
             difficulty = r.get("difficulty") or "simple"
             if difficulty not in self.difficulties:
                 continue
-            rows.append(dict(r))
+            row = dict(r)
+            # Newer ``birdsql/bird23-train-filtered`` releases ship only
+            # ``db_id, question, evidence, SQL`` -- no ``question_id``.
+            # Synthesize a stable id from the dataset row index so
+            # downstream task_id construction and seeded sampling
+            # remain reproducible.
+            row.setdefault("question_id", idx)
+            row.setdefault("difficulty", difficulty)
+            rows.append(row)
         return rows
 
     def _sample_questions(self, pool: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1055,13 +1064,18 @@ def _download_and_extract_train_dbs(
 
     # Per-ZipInfo decision: extract or skip?
     def _wanted(info: zipfile.ZipInfo) -> bool:
-        # Normalize path separators (zipfile always uses '/'). The
-        # official BIRD train zip lays files out as
-        # ``train/train_databases/<db_id>/<db_id>.sqlite`` plus
-        # accompanying CSV / description files.
+        # Normalize path separators (zipfile always uses '/'). Two
+        # observed BIRD train zip layouts:
+        #   (a) flat:   ``train/train_databases/<db_id>/<db_id>.sqlite``
+        #   (b) nested: ``train/train_databases.zip`` (an inner zip
+        #       containing the same ``train_databases/<db_id>/...``
+        #       tree). Current upstream uses (b); we stream the inner
+        #       zip to a tempfile after this loop -- not into ``dest``
+        #       -- so it doesn't compete with the per-db outputs for
+        #       the workspace NFS quota.
         parts = info.filename.split("/")
-        # Find the ``train_databases`` segment, then the immediately
-        # following segment is the db_id.
+        if parts and parts[-1] == "train_databases.zip":
+            return False
         try:
             idx = parts.index("train_databases")
         except ValueError:
@@ -1122,6 +1136,112 @@ def _download_and_extract_train_dbs(
         f"skipped oversized={skipped_oversized}, "
         f"skipped unreferenced={skipped_unreferenced}"
     )
+
+    # Layout (b): the outer zip contains a single nested
+    # ``train_databases.zip`` rather than the per-db tree directly.
+    # Stream that inner zip into a tempfile on /tmp (not into ``dest``,
+    # which is on the workspace NFS volume with a tight per-user
+    # quota), drop the now-redundant outer zip to reclaim ~8GB of
+    # quota, then extract the per-db files we want into
+    # ``train/train_databases/<db_id>/...`` so the flatten step below
+    # picks them up unchanged.
+    inner_zip_paths: list[Path] = []
+    inner_zip_outer_names: list[str] = []
+    with zipfile.ZipFile(zip_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            parts = info.filename.split("/")
+            if not parts or parts[-1] != "train_databases.zip":
+                continue
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                prefix="bird_inner_", suffix=".zip"
+            )
+            os.close(tmp_fd)
+            tmp_path = Path(tmp_name)
+            print(
+                f"[bird] streaming nested {info.filename} "
+                f"into tempfile {tmp_path} ({_human_bytes(info.file_size)})"
+            )
+            with zf.open(info) as src, tmp_path.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+            inner_zip_paths.append(tmp_path)
+            inner_zip_outer_names.append(info.filename)
+
+    # Drop the outer zip ASAP -- the inner zip(s) are safely on /tmp now,
+    # and the per-db extraction below needs the workspace quota space.
+    if inner_zip_paths and not os.environ.get("BIRD_KEEP_ZIP"):
+        try:
+            zip_path.unlink()
+            print(
+                f"[bird] removed {zip_path} early to free workspace "
+                f"quota during inner-zip extraction"
+            )
+        except OSError:
+            pass
+
+    for inner_zip_path, outer_name in zip(inner_zip_paths, inner_zip_outer_names):
+        # Mirror the layout the flatten step expects:
+        # ``<dest>/<outer_dir>/train_databases/<db_id>/...``.
+        outer_parts = outer_name.split("/")
+        outer_dir = (
+            dest.joinpath(*outer_parts[:-1]) if len(outer_parts) > 1 else dest
+        )
+        inner_target = outer_dir / "train_databases"
+        inner_target.mkdir(parents=True, exist_ok=True)
+        inner_extracted = 0
+        inner_bytes = 0
+        inner_skipped_oversized = 0
+        inner_skipped_unreferenced = 0
+        print(f"[bird] unpacking nested {outer_name} from {inner_zip_path}")
+        with zipfile.ZipFile(inner_zip_path) as inner_zf:
+            for info in inner_zf.infolist():
+                if info.is_dir():
+                    continue
+                inner_parts = info.filename.split("/")
+                # Locate the db_id: typical layout is
+                # ``train_databases/<db_id>/...`` but some packings
+                # drop the leading ``train_databases/`` segment.
+                try:
+                    inner_idx = inner_parts.index("train_databases")
+                    db_id_segment = inner_idx + 1
+                except ValueError:
+                    db_id_segment = 0
+                if db_id_segment >= len(inner_parts):
+                    continue
+                db_id = inner_parts[db_id_segment]
+                if refs and db_id not in refs:
+                    inner_skipped_unreferenced += 1
+                    continue
+                if (
+                    max_db_bytes is not None
+                    and info.file_size > max_db_bytes
+                    and info.filename.endswith(".sqlite")
+                ):
+                    inner_skipped_oversized += 1
+                    continue
+                # Re-root onto ``<inner_target>/<db_id>/...`` so the
+                # flatten step finds the expected directory tree.
+                rel_parts = inner_parts[db_id_segment:]
+                out_path = inner_target.joinpath(*rel_parts)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                with inner_zf.open(info) as src, out_path.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                inner_extracted += 1
+                inner_bytes += info.file_size
+        print(
+            f"[bird] inner extract done: {inner_extracted} entries, "
+            f"{_human_bytes(inner_bytes)}; "
+            f"skipped oversized={inner_skipped_oversized}, "
+            f"skipped unreferenced={inner_skipped_unreferenced}"
+        )
+        try:
+            inner_zip_path.unlink()
+        except OSError:
+            pass
+
+    # If we didn't take the early-drop branch (BIRD_KEEP_ZIP=1, or no
+    # inner zip was present), clean up the outer zip below as before.
 
     # The official zip has a top-level ``train/`` directory. Flatten
     # it so the layout we expect (``<db_id>/<db_id>.sqlite`` directly

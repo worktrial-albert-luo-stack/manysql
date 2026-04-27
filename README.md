@@ -160,31 +160,31 @@ manysql-codegen --list
 | `aggressive_alien` | aggressive | NIL nulls, `::` casts, `~=` for null-safe equality, `+` for string concat, `OFFSET … FETCH` limits, no ILIKE, `HAVE` instead of `HAVING`, `ORDERED BY` instead of `ORDER BY`. Stresses the LLM refine loop. |
 | `snowflake_clone` | mild | Faithful Snowflake target: UPPER identifier fold, ILIKE, NULLS FIRST/LAST defaults, division-by-zero errors, integer division promotes to float, `//` line comments, `TRY_CAST`/`NVL`/`IFNULL` aliases. |
 | `sqlite_clone` | mild | Faithful SQLite target: preserve-case (ASCII-insensitive) identifiers, NULL-on-divide-by-zero, truncating integer division, case-insensitive `LIKE`, no `ILIKE`, C-style boolean truthiness, `IFNULL`/`SUBSTRING` aliases. Pairs with `snowflake_clone` to bracket realistic real-world divergence. |
-| `postgres_clone` | mild | Faithful Postgres target: lowercase identifier fold, NULLS LAST on ASC / FIRST on DESC, division-by-zero errors, truncating integer division, case-sensitive `LIKE`, native `ILIKE`, strict booleans, `CHAR_LENGTH`/`SUBSTRING` aliases. Used as the engine-perf baseline by [`eval/perf_bench.py`](eval/perf_bench.py). |
+| `postgres_clone` | mild | Faithful Postgres target: lowercase identifier fold, NULLS LAST on ASC / FIRST on DESC, division-by-zero errors, truncating integer division, case-sensitive `LIKE`, native `ILIKE`, strict booleans, `CHAR_LENGTH`/`SUBSTRING` aliases. Used as the engine-perf baseline by [`eval/perf_bench.py`](eval/perf_bench.py); see [`eval/PERFORMANCE.md`](eval/PERFORMANCE.md) for measured results. |
 
 ### Synth-generated dialects (sample)
 
 The batch campaign generator (`manysql-codegen batch`) emits LLM-designed
-dialects on top of the bundled specs above; running a few campaigns has
-populated `manysql/dialects/` with ~30 distinct surfaces. A non-exhaustive
-sample of the more recognizable ones, to give a sense of the design
-space the codegen pipeline can hit:
+dialects on top of the bundled specs above. The dialects below come from
+the most recent campaign, run after the LLM-lane harness was widened with
+axis-targeted parse + IR batteries, a rejection battery (must-fail
+reference-form syntax per non-default knob), and a card-conformance gate
+that refuses to ship a package when the dialect card advertises syntax
+the grammar doesn't actually accept. They headline lexical / operator
+axes the previous batches missed silently.
 
 | Name | Inspired by | Headline divergences |
 | --- | --- | --- |
-| `mild_postgres_core` | postgres | `::` casts, double-quoted identifiers, lowercase fold, `ILIKE`, `\|\|` concat, `EXTRACT`/`DATE_PART` temporals. |
-| `mild_snowflake_upper` | snowflake | Upper-case identifier folding, `ILIKE`, NULLS-last default ordering. |
-| `moderate_mysql_loose` | mysql | Backtick identifiers, `LIMIT` w/o `OFFSET` keyword, loose boolean truthiness, `CONCAT(...)`-only string joining. |
-| `tsql_ish` | sql_server | Bracket identifiers, `+` string concat, `LEN`, case-insensitive default collation (effects.py lane). |
-| `bracket_oracle_pg` | sql_server, oracle, postgres | Bracket-quoting + Oracle `FETCH FIRST` row limiting + Postgres `::` casts, `CONCAT`-only string joining. |
-| `snowacle_qualify` | snowflake, oracle | `QUALIFY`-only row limiting, NULLS FIRST as immutable global default, `DEFINE` instead of `WITH`, `MATCHING` instead of `USING`. |
-| `bigmaria_pivot` | bigquery, mariadb | `PIVOT`/`UNPIVOT` as first-class FROM-clause operators, aggregate `FILTER` spelled as `WHERE` inside parens. |
-| `redgres_lateral` | redshift, postgres, bigquery | Mandatory `LATERAL` for correlated FROM subqueries, `MATCHING` instead of `USING`, `CONCAT_WS`-only string joining. |
-| `mariflake_comma_semi` | mariadb, snowflake, db2 | Semicolons between comma-joined tables, `DEFINE` for CTEs, reversed `EXCEPT`/`INTERSECT` precedence over `UNION`. |
-| `mysqlite_upsert` | mysql, sqlite, snowflake | `UPSERT` keyword for MERGE, reversed `EXCEPT`/`INTERSECT` precedence, `MATCHING` for join `USING`. |
-| `pgserver_schema_ns` | postgres, sql_server | Schema-qualified function namespaces (`schema::func`), `OFFSET`/`FETCH` limits, reversed `<>` not-equal. |
-| `snowflake_server_oracle_neq` | snowflake, sql_server, oracle | Exclusive `^=` not-equal operator, `CONVERT_FN(...)` casting, double-quoted strings, upper-fold identifiers. |
-| `db2_snowflake_sqlite_rangefold` | db2, snowflake, sqlite | `RANGE UNBOUNDED PRECEDING TO CURRENT ROW` window default, double-quoted identifiers with upper fold. |
+| `oracle_maria_modconcat` | oracle, mariadb, db2 | `MOD` as infix keyword for modulo, `+` for string concat, `<=>` null-safe equality, `^=` not-equal, `EXCEPT`/`INTERSECT` bind tighter than `UNION`. |
+| `firebird_click_wildcard` | firebird, clickhouse, sql_server | `*` / `?` LIKE wildcard chars (replacing `%` / `_`), `CONCAT(...)`-only string joining, bracket identifier quoting, rich function aliases (`LEN`/`IFNULL`/`MID`). |
+| `redshift_informix_cmpops` | redshift, informix, db2 | `==` for equality with triple `^=` / `<>` / `!=` neq spellings, `MOD` infix, `convert_fn` cast syntax, `//` line comments, `CHAR_LENGTH`-primary function aliasing. |
+| `hive_teradata_nullsafe_wild` | hive, teradata, mysql | `<=>` null-safe equality (MySQL/Hive), `?` LIKE wildcard for single-char match, `\|\|` concat with typed coercion, `MOD` infix, backtick identifiers, `EXCEPT`/`INTERSECT` tighter precedence. |
+| `snowdb2_dotmod_nullsafe` | snowflake, db2, sql_server | `.` LIKE wildcard char (replaces `_`), `MOD(a, b)` function-style modulo, `ISNULL(a,b) = ISNULL(c,d)` null-safe-eq pattern, bracket identifiers, `OFFSET`/`FETCH` limits. |
+| `sqlite_pg_concatmod_hybrid` | sqlite, postgres, snowflake | `\|\|` concat with typed coercion (SQLite-style implicit text cast), dual `MOD()` / `%` modulo, broad alias dispatch (`NVL`/`IFNULL`/`COALESCE` and `LEN`/`LENGTH`/`CHAR_LENGTH`), `EXCEPT`/`INTERSECT` tighter precedence. |
+| `bigquery_sqlite_notprefix` | bigquery, sqlite, sql_server | T-SQL legacy `!<` for `>=` and `!>` for `<=`, `@` LIKE wildcard, backtick identifiers, `CONCAT(...)`-only string joining, broad function aliasing. |
+| `clickhouse_oracle_samplelimit` | clickhouse, oracle, snowflake | `SAMPLE N` row-limiting syntax, native null-safe-eq disabled (forces `ISNULL`-style workaround), `#` hash-line comments, `MOD()` function aliasing, preserve-case identifiers, required statement terminator. |
+| `db2_oracle_fetchfirst` | db2, oracle, sql_2008 | `FETCH FIRST N ROWS ONLY` row-limiting (DB2/SQL:2008), `MINUS` keyword for `EXCEPT`, `UNIQUE` keyword for `DISTINCT`, sole `<>` not-equal (no `!=`), upper-case identifier fold with case-sensitive double-quoted identifiers. |
+| `informix_firebird_firstn` | informix, firebird, oracle, db2 | `FIRST N` (head-style) row-limiting, double-quoted string literals, upper-case-folded double-quoted identifiers, `MINUS` for `EXCEPT`, `UNIQUE` for `DISTINCT`, sole `<>` not-equal. |
 
 Campaigns themselves get manifests under
 `manysql/dialects/_campaigns/<id>.json` (per-campaign config, brief, every

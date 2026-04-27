@@ -25,7 +25,11 @@ from typing import Optional
 from lark import Lark
 from lark.exceptions import LarkError
 
-from manysql.codegen.parse_battery import _REFERENCE_SQL, apply_surface
+from manysql.codegen.parse_battery import (
+    _REFERENCE_SQL,
+    apply_surface,
+    axis_battery_items,
+)
 from manysql.ir.plan import ColumnSchema, Plan
 from manysql.ir.printer import render_plan
 from manysql.spec.dialect import DialectSpec, LimitSyntax
@@ -90,10 +94,13 @@ def build_ir_battery(spec: DialectSpec) -> list[IRBatteryItem]:
     cannot encode (currently: ``OFFSET`` for ``HEAD_N`` / ``SAMPLE_N`` /
     ``TOP_N``) are skipped so the lowering isn't asked to reconstruct
     information that was discarded by the rewriter.
+
+    Axis-targeted items mirror the parse battery: included when the spec
+    flips the relevant knob, omitted otherwise.
     """
     skip_labels = _skipped_labels(spec)
     items: list[IRBatteryItem] = []
-    for label, ref_sql in _REFERENCE_SQL:
+    for label, ref_sql in list(_REFERENCE_SQL) + axis_battery_items(spec):
         if label in skip_labels:
             continue
         items.append(

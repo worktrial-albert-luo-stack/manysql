@@ -241,7 +241,10 @@ uv run manysql-perf-bench --no-verify
 
 The script prints a Rich summary table with median / p95 latency for each
 engine and the manysql/Postgres ratio, plus a one-line geometric-mean
-speedup at the end. Equivalence checking normalizes Postgres `Decimal`
+speedup at the end. See [`PERFORMANCE.md`](PERFORMANCE.md) for an
+annotated set of recent results (200k rows, 15/15 row-equivalence,
+geomean ~1.03x), including which query shapes each engine wins on
+and why. Equivalence checking normalizes Postgres `Decimal`
 to `float`, rounds floats to 6 dp, and compares unordered when the SQL
 has no `ORDER BY`, so minor numeric / ordering differences don't trip
 false negatives — but real semantic divergences (e.g. NULL ordering,

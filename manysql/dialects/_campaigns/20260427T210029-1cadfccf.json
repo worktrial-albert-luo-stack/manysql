@@ -1,0 +1,367 @@
+{
+  "brief": {
+    "forbidden_knobs": [],
+    "inspirations": [
+      "postgres",
+      "mysql",
+      "sql_server",
+      "oracle",
+      "snowflake",
+      "bigquery",
+      "mariadb",
+      "db2",
+      "redshift",
+      "sqlite",
+      "teradata",
+      "hive",
+      "clickhouse",
+      "informix",
+      "firebird",
+      "sap_hana"
+    ],
+    "prior": "Two complementary dialects extending the prior batch's axis coverage. Each slot must headline at least one row-limit syntax variant the prior batch did NOT ship cleanly (e.g. TOP N, HEAD N, FETCH FIRST...ROWS ONLY, FIRST N rows). The other headline axes should pick from gaps the prior 8 dialects missed: double-quoted string literals, sole-<> not-equal spelling, double-quoted identifiers with case-fold, MINUS keyword for EXCEPT, UNIQUE keyword for DISTINCT. Avoid: MOD infix (already 4 dialects), <=> null-safe-eq (already 2), MOD function (already 2), ^= neq (already 2), || concat with typed coercion (already 2), bracket quoting (already 2), backtick quoting (already 3), CONCAT-only (already 3), SAMPLE N (already 1), at-sign wildcard (already 1), star/dot/question wildcard (already 3), EXCEPT/INTERSECT tighter precedence (already 4). Cards must be self-consistent: every example in the rendered card must parse against the final grammar \u2014 the card-conformance gate will reject otherwise.",
+    "style_notes": "Design exactly two dialects that are moderate in overall complexity\u2014each should feel like a plausible real-world engine, not a puzzle. Dialect A must headline a FETCH FIRST N ROWS ONLY limit syntax and pair it with at least one of: MINUS for EXCEPT, sole <> not-equal, or UNIQUE for DISTINCT. Dialect B must headline either TOP N or FIRST N limit syntax and pair it with double-quoted string literals and at least one of the remaining gap axes (double-quoted identifiers with upper-case fold, MINUS, UNIQUE, sole <>). Avoid reintroducing any of the explicitly over-represented knobs listed in the prior (MOD infix, <=> null-safe eq, ^= neq, bracket quoting, backtick quoting, CONCAT-only, SAMPLE N, at-sign wildcard, star/dot/question wildcard, EXCEPT/INTERSECT tighter precedence, || with typed coercion). Every example snippet embedded in the card must be parseable under the dialect's own grammar rules\u2014double-check that string-literal quoting, identifier quoting, and limit clauses are internally consistent.",
+    "suggested_axes": [
+      "FETCH FIRST N ROWS ONLY row-limit (DB2/SQL:2008 style) vs TOP N (SQL Server style)",
+      "Double-quoted string literals (like MySQL sql_mode or SQLite)",
+      "Sole <> as the only not-equal spelling (no != allowed)",
+      "MINUS keyword as synonym/replacement for EXCEPT (Oracle style)",
+      "UNIQUE keyword as synonym/replacement for DISTINCT (Informix/early SQL style)",
+      "Double-quoted identifiers with automatic upper-case fold (Oracle/DB2 behavior)",
+      "FIRST N rows limit syntax (Informix/Firebird style)",
+      "|| as pure string concat with NO implicit type coercion (operands must already be strings)"
+    ]
+  },
+  "config": {
+    "exclude_knobs": [],
+    "grammar_max_iterations": 5,
+    "inspired_by": [
+      "postgres",
+      "mysql",
+      "sql_server",
+      "oracle",
+      "snowflake",
+      "bigquery",
+      "mariadb",
+      "db2",
+      "redshift",
+      "sqlite",
+      "teradata",
+      "hive",
+      "clickhouse",
+      "informix"
+    ],
+    "lowering_max_iterations": 5,
+    "max_concurrency": 2,
+    "model": "anthropic/claude-opus-4.6",
+    "n": 2,
+    "prior": "Two complementary dialects extending the prior batch's axis coverage. Each slot must headline at least one row-limit syntax variant the prior batch did NOT ship cleanly (e.g. TOP N, HEAD N, FETCH FIRST...ROWS ONLY, FIRST N rows). The other headline axes should pick from gaps the prior 8 dialects missed: double-quoted string literals, sole-<> not-equal spelling, double-quoted identifiers with case-fold, MINUS keyword for EXCEPT, UNIQUE keyword for DISTINCT. Avoid: MOD infix (already 4 dialects), <=> null-safe-eq (already 2), MOD function (already 2), ^= neq (already 2), || concat with typed coercion (already 2), bracket quoting (already 2), backtick quoting (already 3), CONCAT-only (already 3), SAMPLE N (already 1), at-sign wildcard (already 1), star/dot/question wildcard (already 3), EXCEPT/INTERSECT tighter precedence (already 4). Cards must be self-consistent: every example in the rendered card must parse against the final grammar \u2014 the card-conformance gate will reject otherwise.",
+    "require_battery_pass": true,
+    "seed": null,
+    "theme": "moderate"
+  },
+  "drafted": [
+    {
+      "ledger": {
+        "description": "DB2/Oracle-inspired dialect with FETCH FIRST N ROWS ONLY limits, MINUS for EXCEPT, UNIQUE for DISTINCT, and sole <> not-equal spelling.",
+        "name": "db2_oracle_fetchfirst",
+        "primary_axes": [
+          "FETCH FIRST N ROWS ONLY limit syntax",
+          "MINUS for EXCEPT + UNIQUE for DISTINCT",
+          "sole <> not-equal (no != allowed)"
+        ]
+      },
+      "spec": {
+        "description": "DB2/Oracle-inspired moderate dialect: FETCH FIRST N ROWS ONLY limits, MINUS for EXCEPT, sole <> not-equal, UNIQUE for DISTINCT, upper-case fold with double-quoted identifiers.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "db2",
+          "oracle",
+          "sql_2008"
+        ],
+        "name": "db2_oracle_fetchfirst",
+        "notes": "Moderate dialect A for the campaign. Headlines FETCH FIRST N ROWS ONLY (offset_fetch limit_syntax), MINUS replacing EXCEPT, sole <> as the only not-equal operator, and UNIQUE replacing DISTINCT. Upper-case identifier fold with case-sensitive double-quoted identifiers mirrors Oracle/DB2 behavior. || is pure string concat with no implicit coercion (operands must be strings). Requires semicolon terminator.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "error",
+          "group_by_accepts_select_aliases": false,
+          "identifier_case_fold": "upper",
+          "ilike_supported": false,
+          "integer_division": "truncate",
+          "like_case_sensitive": true,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "||",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_dash_dash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "UNIQUE",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "MINUS",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "NVL"
+            ],
+            "LENGTH": [
+              "LENGTH",
+              "CHAR_LENGTH"
+            ],
+            "SUBSTR": [
+              "SUBSTR",
+              "SUBSTRING"
+            ],
+            "TRIM": [
+              "TRIM",
+              "STRIP"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "double",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL JOIN",
+          "join_inner_keyword": "JOIN",
+          "join_left_keyword": "LEFT JOIN",
+          "join_right_keyword": "RIGHT JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "FETCH FIRST",
+          "limit_syntax": "offset_fetch",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "%",
+          "mul_op": "*",
+          "neq_op": [
+            "<>"
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "IS NOT DISTINCT FROM",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "ansi",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "Informix/Firebird-inspired dialect with FIRST N limit syntax, double-quoted string literals, MINUS for EXCEPT, UNIQUE for DISTINCT, upper-case identifier fold, and sole <> not-equal.",
+        "name": "informix_firebird_firstn",
+        "primary_axes": [
+          "FIRST N (head_n) limit syntax",
+          "double-quoted string literals + upper-case fold identifiers",
+          "MINUS for EXCEPT + UNIQUE for DISTINCT + sole <>"
+        ]
+      },
+      "spec": {
+        "description": "Informix/Firebird-inspired dialect with FIRST N limit syntax, double-quoted string literals, upper-case-folded double-quoted identifiers, MINUS for EXCEPT, and sole <> not-equal.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "informix",
+          "firebird",
+          "oracle",
+          "db2"
+        ],
+        "name": "informix_firebird_firstn",
+        "notes": "Headline axes: FIRST N (head_n) limit syntax from Informix/Firebird tradition, double-quoted string literals, upper-case-folded double-quoted identifiers, MINUS for EXCEPT, UNIQUE for DISTINCT, and sole <> not-equal. The || concat is pure string-only (no implicit type coercion). Double-quote serves dual duty for strings and identifiers, resolved by parser context (identifier quoting uses double quotes around identifiers in FROM/JOIN/GROUP BY positions; string literals use double quotes in value positions).",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "error",
+          "group_by_accepts_select_aliases": false,
+          "identifier_case_fold": "upper",
+          "ilike_supported": false,
+          "integer_division": "truncate",
+          "like_case_sensitive": true,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": false,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "||",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_dash_dash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "UNIQUE",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "MINUS",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "NVL"
+            ],
+            "LENGTH": [
+              "LENGTH",
+              "CHAR_LENGTH"
+            ],
+            "LOWER": [
+              "LOWER"
+            ],
+            "SUBSTR": [
+              "SUBSTR",
+              "SUBSTRING"
+            ],
+            "UPPER": [
+              "UPPER"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "double",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL JOIN",
+          "join_inner_keyword": "JOIN",
+          "join_left_keyword": "LEFT JOIN",
+          "join_right_keyword": "RIGHT JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "FIRST",
+          "limit_syntax": "head_n",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "%",
+          "mul_op": "*",
+          "neq_op": [
+            "<>"
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "IS NOT DISTINCT FROM",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "ansi",
+          "statement_terminator": ";",
+          "string_quote": "double",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    }
+  ],
+  "failed_packages": [],
+  "failed_specs": [],
+  "finished_at": "2026-04-27T21:05:12.003535+00:00",
+  "id": "20260427T210029-1cadfccf",
+  "packaged": [
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "informix_firebird_firstn",
+      "path": "/Users/albert/code/manysql/manysql/dialects/informix_firebird_firstn"
+    },
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "db2_oracle_fetchfirst",
+      "path": "/Users/albert/code/manysql/manysql/dialects/db2_oracle_fetchfirst"
+    }
+  ],
+  "started_at": "2026-04-27T21:00:29.060537+00:00"
+}

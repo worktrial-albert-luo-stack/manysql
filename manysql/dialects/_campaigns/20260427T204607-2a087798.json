@@ -1,0 +1,1637 @@
+{
+  "brief": {
+    "forbidden_knobs": [],
+    "inspirations": [
+      "postgres",
+      "mysql",
+      "sql_server",
+      "oracle",
+      "snowflake",
+      "bigquery",
+      "mariadb",
+      "db2",
+      "redshift",
+      "sqlite",
+      "teradata",
+      "hive",
+      "clickhouse",
+      "informix",
+      "firebird"
+    ],
+    "prior": "Hybrid dialects exercising the newly-supported axes: operator-level divergences (mod, concat, null-safe-eq, comparison), wildcard char variants, function-alias-driven dispatch, set-op precedence inversion (EXCEPT/INTERSECT bind tighter than UNION), and quoting variants. Each slot must headline at least one operator/lexical axis the prior campaigns missed silently. Avoid axes already exhausted in prior batches.",
+    "style_notes": "Each dialect in this campaign must headline at least one operator-level or lexical-level axis that prior campaigns have not exercised: modulo syntax, concatenation operator, null-safe equality, comparison-operator spelling, LIKE wildcard characters, function-alias mappings, or set-operation precedence rules. Dialects should feel like plausible moderate-complexity hybrids\u2014mixing two or three real-world inspirations rather than inventing wholly alien syntax. Keep keyword casing conventional (upper or lower, not mixed) and avoid extreme structural changes (e.g., reversed clause order). Workers should ensure that at least two of the eight suggested axes are exercised per dialect, with one being the primary differentiator. Quoting-variant choices should complement, not overshadow, the operator-level divergences. Aim for dialects that are tricky enough to expose parser confusion between similar-looking operators but not so exotic that they lose resemblance to real SQL.",
+    "suggested_axes": [
+      "mod operator form: % vs MOD() vs MOD infix keyword",
+      "string concat: || vs + vs CONCAT() only vs double-pipe with typed coercion",
+      "null-safe equality: <=> vs IS NOT DISTINCT FROM vs ISNULL(a,b)=ISNULL(c,d)",
+      "comparison operators: != vs <> vs ^= (Oracle-style) and NOT-prefix forms",
+      "wildcard chars in LIKE: % and _ vs * and ? vs * and _ hybrid",
+      "function aliasing: LEN vs LENGTH vs CHAR_LENGTH, IFNULL vs NVL vs COALESCE dispatch",
+      "set-op precedence inversion: EXCEPT/INTERSECT bind tighter than UNION vs equal precedence",
+      "identifier quoting: double-quote vs backtick vs square-bracket vs none-required"
+    ]
+  },
+  "config": {
+    "exclude_knobs": [],
+    "grammar_max_iterations": 5,
+    "inspired_by": [
+      "postgres",
+      "mysql",
+      "sql_server",
+      "oracle",
+      "snowflake",
+      "bigquery",
+      "mariadb",
+      "db2",
+      "redshift",
+      "sqlite"
+    ],
+    "lowering_max_iterations": 5,
+    "max_concurrency": 5,
+    "model": "anthropic/claude-opus-4.6",
+    "n": 10,
+    "prior": "Hybrid dialects exercising the newly-supported axes: operator-level divergences (mod, concat, null-safe-eq, comparison), wildcard char variants, function-alias-driven dispatch, set-op precedence inversion (EXCEPT/INTERSECT bind tighter than UNION), and quoting variants. Each slot must headline at least one operator/lexical axis the prior campaigns missed silently. Avoid axes already exhausted in prior batches.",
+    "require_battery_pass": true,
+    "seed": null,
+    "theme": "moderate"
+  },
+  "drafted": [
+    {
+      "ledger": {
+        "description": "Oracle/MariaDB hybrid headlining MOD infix keyword for modulo, ^= not-equal, <=> null-safe equality, + string concat, and set-op precedence inversion.",
+        "name": "oracle_maria_modconcat",
+        "primary_axes": [
+          "MOD infix keyword for modulo",
+          "^= neq + <=> null-safe-eq operators",
+          "EXCEPT/INTERSECT tighter set-op precedence"
+        ]
+      },
+      "spec": {
+        "description": "Oracle/MariaDB hybrid: MOD() function for modulo, + for string concat, <=> null-safe equality, ^= as neq, set-op precedence inversion.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "oracle",
+          "mariadb",
+          "db2"
+        ],
+        "name": "oracle_maria_modconcat",
+        "notes": "Primary axes: MOD as infix keyword for modulo (instead of %), ^= as Oracle-style not-equal, <=> for null-safe equality (MariaDB-style), + for string concatenation (SQL Server-style), and EXCEPT/INTERSECT binding tighter than UNION (DB2/Postgres precedence). OFFSET/FETCH limit syntax rounds out the moderate divergence profile.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "error",
+          "group_by_accepts_select_aliases": false,
+          "identifier_case_fold": "upper",
+          "ilike_supported": false,
+          "integer_division": "truncate",
+          "like_case_sensitive": true,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "+",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_dash_dash",
+            "block_c"
+          ],
+          "concat_op": "+",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "NVL",
+              "COALESCE",
+              "IFNULL"
+            ],
+            "LENGTH": [
+              "LENGTH",
+              "LEN",
+              "CHAR_LENGTH"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "SUBSTRING": [
+              "SUBSTR",
+              "SUBSTRING"
+            ],
+            "TRIM": [
+              "TRIM",
+              "STRIP"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "double",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL JOIN",
+          "join_inner_keyword": "JOIN",
+          "join_left_keyword": "LEFT JOIN",
+          "join_right_keyword": "RIGHT JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "LIMIT",
+          "limit_syntax": "offset_fetch",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "MOD",
+          "mul_op": "*",
+          "neq_op": [
+            "^=",
+            "<>",
+            "!="
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "<=>",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "Firebird/ClickHouse hybrid headlining LIKE wildcard chars (* instead of %), CONCAT_only string concatenation, bracket identifier quoting, and extensive function aliasing.",
+        "name": "firebird_click_wildcard",
+        "primary_axes": [
+          "LIKE wildcard char (* for multi-match)",
+          "CONCAT_only string concat (no infix op)",
+          "function alias dispatch (LEN/IFNULL/MID/POW)"
+        ]
+      },
+      "spec": {
+        "description": "Firebird/ClickHouse hybrid headlining LIKE wildcard chars (* and ?), CONCAT_only string concat, bracket identifier quoting, and rich function aliasing.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "firebird",
+          "clickhouse",
+          "sql_server"
+        ],
+        "name": "firebird_click_wildcard",
+        "notes": "Primary differentiator is LIKE wildcard character divergence (star wildcard_char maps * for multi-char and implicitly ? for single-char patterns instead of % and _), combined with CONCAT_only string concatenation (no infix operator). Bracket quoting \u00e0 la SQL Server complements the operator-level axes. Rich function aliasing (CHAR_LENGTH/LEN, IFNULL/NVL, SUBSTRING/MID) stresses function-dispatch logic. Firebird-inspired uppercase fold with case-sensitive quoted identifiers and required semicolons add moderate structural friction.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "error",
+          "group_by_accepts_select_aliases": false,
+          "identifier_case_fold": "upper",
+          "ilike_supported": false,
+          "integer_division": "truncate",
+          "like_case_sensitive": true,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "CONCAT_only",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_dash_dash",
+            "block_c",
+            "line_double_slash"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "IFNULL",
+              "NVL"
+            ],
+            "LENGTH": [
+              "CHAR_LENGTH",
+              "CHARACTER_LENGTH",
+              "LEN"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "NOW": [
+              "NOW",
+              "CURRENT_TIMESTAMP"
+            ],
+            "POWER": [
+              "POWER",
+              "POW"
+            ],
+            "SUBSTR": [
+              "SUBSTRING",
+              "SUBSTR",
+              "MID"
+            ],
+            "TRIM": [
+              "TRIM",
+              "BTRIM"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "bracket",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL JOIN",
+          "join_inner_keyword": "JOIN",
+          "join_left_keyword": "LEFT JOIN",
+          "join_right_keyword": "RIGHT JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "LIMIT",
+          "limit_syntax": "limit_offset",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "%",
+          "mul_op": "*",
+          "neq_op": [
+            "!=",
+            "<>"
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "IS NOT DISTINCT FROM",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "ansi",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "Redshift/Informix hybrid headlining == equality operator, triple neq spellings (including ^=), convert_fn casting, MOD infix keyword, and EXCEPT/INTERSECT-tighter set-op precedence.",
+        "name": "redshift_informix_cmpops",
+        "primary_axes": [
+          "== equality + ^= neq comparison operators",
+          "convert_fn cast syntax with MOD infix",
+          "CHAR_LENGTH-primary function aliasing"
+        ]
+      },
+      "spec": {
+        "description": "Redshift/Informix hybrid headlining NOT-prefix comparison forms (NOT < for >=), convert_fn casting, double-slash comments, and extensive function aliasing with CHAR_LENGTH dispatch.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "redshift",
+          "informix",
+          "db2"
+        ],
+        "name": "redshift_informix_cmpops",
+        "notes": "Primary differentiators: (1) == for equality instead of =, plus triple neq spellings including ^=; (2) MOD as infix keyword for modulo; (3) convert_fn cast syntax; (4) EXCEPT/INTERSECT bind tighter than UNION; (5) rich function aliasing with CHAR_LENGTH as primary for LENGTH. The double-slash comment style and OUTER JOIN keyword verbosity add lexical texture. Window frame default changed to rows_unbounded_to_current for semantic variety.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "error",
+          "group_by_accepts_select_aliases": true,
+          "identifier_case_fold": "lower",
+          "ilike_supported": true,
+          "integer_division": "truncate",
+          "like_case_sensitive": true,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "||",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "rows_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CONVERT",
+          "cast_syntax": "convert_fn",
+          "comment_styles": [
+            "line_dash_dash",
+            "line_double_slash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "==",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "ABS": [
+              "ABS",
+              "ABSOLUTE"
+            ],
+            "COALESCE": [
+              "COALESCE",
+              "NVL"
+            ],
+            "LENGTH": [
+              "CHAR_LENGTH",
+              "LENGTH",
+              "LEN"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "SUBSTR": [
+              "SUBSTRING",
+              "SUBSTR"
+            ],
+            "TRIM": [
+              "TRIM",
+              "STRIP"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "double",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL OUTER JOIN",
+          "join_inner_keyword": "INNER JOIN",
+          "join_left_keyword": "LEFT OUTER JOIN",
+          "join_right_keyword": "RIGHT OUTER JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "LIMIT",
+          "limit_syntax": "limit_offset",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "MOD",
+          "mul_op": "*",
+          "neq_op": [
+            "<>",
+            "!=",
+            "^="
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "IS NOT DISTINCT FROM",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "Hive/Teradata hybrid headlining <=> null-safe equality, MOD infix keyword for modulo, c_style boolean truthiness, and group-by-alias resolution with set-op precedence inversion.",
+        "name": "hive_teradata_nullsafe_wild",
+        "primary_axes": [
+          "<=> null-safe equality operator",
+          "c_style boolean truthiness + group_by aliases",
+          "MOD infix + EXCEPT/INTERSECT tighter precedence"
+        ]
+      },
+      "spec": {
+        "description": "Hive/Teradata hybrid headlining LIKE wildcard ? for single-char match, MOD() function for modulo, <=> null-safe equality, double-pipe concat with typed coercion semantics, and backtick quoting.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "hive",
+          "teradata",
+          "mysql"
+        ],
+        "name": "hive_teradata_nullsafe_wild",
+        "notes": "Primary differentiator is the <=> null-safe equality operator (MySQL/Hive style) combined with MOD as an infix keyword for modulo, set-op precedence inversion, and backtick identifier quoting. The dialect also exercises function-alias dispatch with CHAR_LENGTH as primary, SUBSTR primary for SUBSTRING, and c_style boolean truthiness from Hive. Array base index 0 follows Hive convention. GROUP BY accepts SELECT aliases as in Hive/Teradata.",
+        "semantics": {
+          "array_base_index": 0,
+          "boolean_truthiness": "c_style",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "null",
+          "group_by_accepts_select_aliases": true,
+          "identifier_case_fold": "lower",
+          "ilike_supported": false,
+          "integer_division": "truncate",
+          "like_case_sensitive": true,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "||",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_dash_dash",
+            "line_hash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "NVL",
+              "IFNULL"
+            ],
+            "LENGTH": [
+              "CHAR_LENGTH",
+              "LENGTH",
+              "LEN"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "SUBSTRING": [
+              "SUBSTR",
+              "SUBSTRING"
+            ],
+            "TRIM": [
+              "TRIM",
+              "BTRIM"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "backtick",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL JOIN",
+          "join_inner_keyword": "JOIN",
+          "join_left_keyword": "LEFT JOIN",
+          "join_right_keyword": "RIGHT JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "LIMIT",
+          "limit_syntax": "limit_offset",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "MOD",
+          "mul_op": "*",
+          "neq_op": [
+            "<>",
+            "!="
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "<=>",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "Snowflake/DB2 hybrid headlining dot wildcard char in LIKE, MOD() function-style modulo, disabled null-safe equality, bracket quoting with OFFSET/FETCH limits, and EXCEPT/INTERSECT-tighter set-op precedence.",
+        "name": "snowdb2_dotmod_nullsafe",
+        "primary_axes": [
+          "dot wildcard char (. replaces _ in LIKE)",
+          "MOD() function-style modulo + no null-safe-eq",
+          "bracket quoting + OFFSET/FETCH limit syntax"
+        ]
+      },
+      "spec": {
+        "description": "Snowflake/DB2 hybrid headlining dot wildcard char, MOD() function syntax, ISNULL-pair null-safe equality pattern, double-pipe concat with typed coercion, and bracket identifier quoting.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "snowflake",
+          "db2",
+          "sql_server"
+        ],
+        "name": "snowdb2_dotmod_nullsafe",
+        "notes": "Primary differentiators: (1) dot wildcard char in LIKE (. instead of _), exercising the wildcard-char axis in a way distinct from firebird_click_wildcard's star; (2) MOD as a function-style operator rather than infix keyword or %; (3) null_safe_eq disabled entirely (no operator available), forcing ISNULL-pair workarounds; (4) bracket quoting + OFFSET/FETCH limit syntax from DB2/SQL Server lineage; (5) EXCEPT/INTERSECT tighter set-op precedence. The concat stays as || but with explicit string_concat_op semantic to test typed coercion paths.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "null",
+          "group_by_accepts_select_aliases": false,
+          "identifier_case_fold": "upper",
+          "ilike_supported": true,
+          "integer_division": "truncate",
+          "like_case_sensitive": true,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": false,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "||",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_dash_dash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "NVL",
+              "IFNULL"
+            ],
+            "LENGTH": [
+              "LENGTH",
+              "LEN",
+              "CHAR_LENGTH"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "MOD": [
+              "MOD"
+            ],
+            "SUBSTR": [
+              "SUBSTR",
+              "SUBSTRING"
+            ],
+            "TRIM": [
+              "TRIM",
+              "STRIP"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "bracket",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL OUTER JOIN",
+          "join_inner_keyword": "INNER JOIN",
+          "join_left_keyword": "LEFT OUTER JOIN",
+          "join_right_keyword": "RIGHT OUTER JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "LIMIT",
+          "limit_syntax": "offset_fetch",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "MOD",
+          "mul_op": "*",
+          "neq_op": [
+            "<>",
+            "!="
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": null,
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "dot",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "SQLite/Postgres hybrid headlining || concat with typed coercion, broad NVL/IFNULL/COALESCE + LENGTH/LEN function aliasing, dual-path MOD()/% modulo, and EXCEPT/INTERSECT-tighter set-op precedence.",
+        "name": "sqlite_pg_concatmod_hybrid",
+        "primary_axes": [
+          "|| concat with typed coercion + dual MOD()/%",
+          "broad function-alias dispatch (NVL/IFNULL/COALESCE, LEN/LENGTH/CHAR_LENGTH)",
+          "case-insensitive LIKE + EXCEPT/INTERSECT tighter precedence"
+        ]
+      },
+      "spec": {
+        "description": "SQLite/Postgres hybrid headlining double-pipe concat with typed coercion semantics, % modulo preserved but MOD() aliased, IS NOT DISTINCT FROM null-safe-eq, and function-alias-driven dispatch for NVL/IFNULL/COALESCE unification.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "sqlite",
+          "postgres",
+          "snowflake"
+        ],
+        "name": "sqlite_pg_concatmod_hybrid",
+        "notes": "Exercises || concat with typed coercion (SQLite-style implicit cast to text), broad function aliasing (NVL/IFNULL/COALESCE unification plus LENGTH/LEN/CHAR_LENGTH), EXCEPT/INTERSECT-tighter precedence, and case-insensitive LIKE. The MOD() function alias coexists with % operator for dual-path modulo.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "c_style",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "null",
+          "group_by_accepts_select_aliases": true,
+          "identifier_case_fold": "lower",
+          "ilike_supported": true,
+          "integer_division": "truncate",
+          "like_case_sensitive": false,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "||",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_dash_dash",
+            "line_hash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "NVL",
+              "IFNULL"
+            ],
+            "LENGTH": [
+              "LENGTH",
+              "LEN",
+              "CHAR_LENGTH",
+              "CHARACTER_LENGTH"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "MOD": [
+              "MOD"
+            ],
+            "SUBSTR": [
+              "SUBSTR",
+              "SUBSTRING",
+              "MID"
+            ],
+            "TRIM": [
+              "TRIM",
+              "STRIP"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "double",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL JOIN",
+          "join_inner_keyword": "JOIN",
+          "join_left_keyword": "LEFT JOIN",
+          "join_right_keyword": "RIGHT JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "LIMIT",
+          "limit_syntax": "limit_offset",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "%",
+          "mul_op": "*",
+          "neq_op": [
+            "!=",
+            "<>"
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "IS NOT DISTINCT FROM",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "BigQuery/SQLite hybrid headlining NOT-prefix comparison operators (!< for >=, !> for <=), at-sign wildcard in LIKE, CONCAT_only string semantics, and backtick quoting.",
+        "name": "bigquery_sqlite_notprefix",
+        "primary_axes": [
+          "NOT-prefix comparison ops (!< and !> for >= and <=)",
+          "at-sign (@) wildcard char in LIKE patterns",
+          "CONCAT_only string concat + broad function aliasing"
+        ]
+      },
+      "spec": {
+        "description": "BigQuery/SQLite hybrid headlining NOT-prefix comparison forms (!< for >=, !> for <=), backtick identifiers, CONCAT_only string concat, at-wildcard in LIKE, and broad function aliasing.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "bigquery",
+          "sqlite",
+          "sql_server"
+        ],
+        "name": "bigquery_sqlite_notprefix",
+        "notes": "Primary differentiator is NOT-prefix comparison operators (!< for >=, !> for <=), inspired by T-SQL's legacy forms. Combines with at-sign (@) wildcard char in LIKE, CONCAT_only string semantics (despite || in surface for legacy compat the semantic layer enforces CONCAT function dispatch), backtick quoting from BigQuery, and EXCEPT/INTERSECT-tighter set-op precedence. Function aliasing is broad with SUBSTR as primary for SUBSTRING.",
+        "semantics": {
+          "array_base_index": 0,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "null",
+          "group_by_accepts_select_aliases": true,
+          "identifier_case_fold": "preserve",
+          "ilike_supported": false,
+          "integer_division": "truncate",
+          "like_case_sensitive": false,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "CONCAT_only",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_dash_dash",
+            "line_hash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "IFNULL",
+              "NVL"
+            ],
+            "LENGTH": [
+              "CHAR_LENGTH",
+              "LENGTH",
+              "LEN"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "SUBSTRING": [
+              "SUBSTR",
+              "SUBSTRING"
+            ],
+            "TRIM": [
+              "TRIM",
+              "BTRIM"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": "!<",
+          "having_keyword": "HAVING",
+          "identifier_quote": "backtick",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL JOIN",
+          "join_inner_keyword": "JOIN",
+          "join_left_keyword": "LEFT JOIN",
+          "join_right_keyword": "RIGHT JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "LIMIT",
+          "limit_syntax": "limit_offset",
+          "lt_op": "<",
+          "lte_op": "!>",
+          "mod_op": "%",
+          "mul_op": "*",
+          "neq_op": [
+            "!=",
+            "<>"
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "IS NOT DISTINCT FROM",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "at",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "MariaDB/DB2 hybrid headlining + string concat operator, sole <> neq spelling (no != alias), TOP N limits with double-colon cast, and ROWS-based window frame default.",
+        "name": "mariadb_db2_ineq_concat",
+        "primary_axes": [
+          "+ string concat with sole <> neq spelling",
+          "TOP N limit syntax + ::cast",
+          "ROWS-based window frame default + EXCEPT/INTERSECT tighter precedence"
+        ]
+      },
+      "spec": {
+        "description": "MariaDB/DB2 hybrid headlining + string concat with CONCAT_only semantics, <> as sole neq spelling, IS NOT DISTINCT FROM null-safe-eq with double-colon cast, and EXCEPT/INTERSECT-tighter set-op precedence.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "mariadb",
+          "db2",
+          "sql_server"
+        ],
+        "name": "mariadb_db2_ineq_concat",
+        "notes": "Exercises the + concat operator path with explicit string_concat_op semantic, sole <> neq spelling (no != alias), bracket quoting, TOP N limit syntax, double-colon cast, and EXCEPT/INTERSECT-tighter set-op precedence. The window frame default diverges to ROWS-based, and array indexing starts at 1 (DB2-style). ILIKE is disabled with case-insensitive LIKE compensating.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "null",
+          "group_by_accepts_select_aliases": false,
+          "identifier_case_fold": "upper",
+          "ilike_supported": false,
+          "integer_division": "truncate",
+          "like_case_sensitive": false,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "+",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "rows_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "double_colon",
+          "comment_styles": [
+            "line_dash_dash",
+            "block_c"
+          ],
+          "concat_op": "+",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "ISNULL",
+              "NVL"
+            ],
+            "LENGTH": [
+              "LEN",
+              "LENGTH",
+              "CHAR_LENGTH"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "SUBSTRING": [
+              "SUBSTRING",
+              "SUBSTR"
+            ],
+            "TRIM": [
+              "TRIM",
+              "STRIP"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "bracket",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL OUTER JOIN",
+          "join_inner_keyword": "INNER JOIN",
+          "join_left_keyword": "LEFT OUTER JOIN",
+          "join_right_keyword": "RIGHT OUTER JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "LIMIT",
+          "limit_syntax": "top_n",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "%",
+          "mul_op": "*",
+          "neq_op": [
+            "<>"
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "IS NOT DISTINCT FROM",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "ClickHouse/Oracle hybrid headlining SAMPLE N limit syntax, disabled null-safe equality, hash-line comments, preserve-case identifiers, and EXCEPT/INTERSECT-tighter set-op precedence.",
+        "name": "clickhouse_oracle_samplelimit",
+        "primary_axes": [
+          "SAMPLE N limit syntax (first in campaign)",
+          "disabled null-safe-eq (no native operator)",
+          "hash-line comments + required semicolons + preserve-case"
+        ]
+      },
+      "spec": {
+        "description": "ClickHouse/Oracle hybrid headlining SAMPLE N limit syntax, ISNULL(a,b)=ISNULL(c,d) null-safe equality pattern (disabled native), hash-style comments, and MOD() function aliasing with preserve-case identifiers.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "clickhouse",
+          "oracle",
+          "snowflake"
+        ],
+        "name": "clickhouse_oracle_samplelimit",
+        "notes": "Primary differentiator is SAMPLE N limit syntax (previously unused in the campaign) combined with disabled null-safe equality (forcing ISNULL-style workarounds). Hash-only line comments (no --), preserve-case identifiers, and required semicolons add moderate parsing friction. EXCEPT/INTERSECT tighter precedence and c_style truthiness round out the divergence profile.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "c_style",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "null",
+          "group_by_accepts_select_aliases": true,
+          "identifier_case_fold": "preserve",
+          "ilike_supported": true,
+          "integer_division": "truncate",
+          "like_case_sensitive": true,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": false,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "||",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_hash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "DISTINCT",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "EXCEPT",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "COALESCE",
+              "NVL"
+            ],
+            "LENGTH": [
+              "LENGTH",
+              "CHAR_LENGTH",
+              "LEN"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "MOD": [
+              "MOD"
+            ],
+            "SUBSTR": [
+              "SUBSTR",
+              "SUBSTRING"
+            ],
+            "TRIM": [
+              "TRIM",
+              "STRIP"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "double",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL JOIN",
+          "join_inner_keyword": "JOIN",
+          "join_left_keyword": "LEFT JOIN",
+          "join_right_keyword": "RIGHT JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "SAMPLE",
+          "limit_syntax": "sample_n",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "%",
+          "mul_op": "*",
+          "neq_op": [
+            "!=",
+            "<>"
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": null,
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    },
+    {
+      "ledger": {
+        "description": "Informix/Snowflake hybrid headlining HEAD N limit syntax, double-slash line comments, MOD infix modulo with <=> null-safe equality, and MINUS/UNIQUE keyword renames.",
+        "name": "informix_snow_headn_modfn",
+        "primary_axes": [
+          "HEAD N limit syntax (first in campaign)",
+          "double-slash comments + MINUS/UNIQUE keyword renames",
+          "<=> null-safe-eq + MOD infix modulo"
+        ]
+      },
+      "spec": {
+        "description": "Informix/Snowflake hybrid headlining HEAD N limit syntax, MOD() function-style modulo, <=> null-safe equality, double-slash comments, and upper-case fold with case-insensitive LIKE.",
+        "divergence": "moderate",
+        "inspired_by": [
+          "informix",
+          "snowflake",
+          "mysql"
+        ],
+        "name": "informix_snow_headn_modfn",
+        "notes": "Headlines HEAD N limit syntax (first in campaign), MOD infix-keyword modulo, <=> null-safe equality, double-slash comments, and MINUS for EXCEPT (Informix/Oracle style). UNIQUE replaces DISTINCT. EXCEPT/INTERSECT bind tighter. Case-insensitive LIKE with upper-case fold rounds out the moderate divergence.",
+        "semantics": {
+          "array_base_index": 1,
+          "boolean_truthiness": "strict",
+          "count_distinct_null": "excluded",
+          "division_by_zero": "error",
+          "group_by_accepts_select_aliases": false,
+          "identifier_case_fold": "upper",
+          "ilike_supported": true,
+          "integer_division": "truncate",
+          "like_case_sensitive": false,
+          "null_order_default_asc": "last",
+          "null_order_default_desc": "first",
+          "null_safe_eq_supported": true,
+          "quoted_identifiers_case_sensitive": true,
+          "select_resolves_through_group_by": false,
+          "set_op_default": "distinct",
+          "string_concat_op": "||",
+          "sum_of_empty_returns_null": true,
+          "window_default_frame": "range_unbounded_to_current"
+        },
+        "surface": {
+          "add_op": "+",
+          "as_keyword": "AS",
+          "between_keyword": "BETWEEN",
+          "case_keyword": "CASE",
+          "case_syntax": "case_when",
+          "cast_keyword": "CAST",
+          "cast_syntax": "cast_as",
+          "comment_styles": [
+            "line_double_slash",
+            "block_c"
+          ],
+          "concat_op": "||",
+          "distinct_keyword": "UNIQUE",
+          "div_op": "/",
+          "else_keyword": "ELSE",
+          "end_keyword": "END",
+          "eq_op": "=",
+          "except_keyword": "MINUS",
+          "exists_keyword": "EXISTS",
+          "from_keyword": "FROM",
+          "function_aliases": {
+            "COALESCE": [
+              "NVL",
+              "COALESCE",
+              "IFNULL"
+            ],
+            "LENGTH": [
+              "CHAR_LENGTH",
+              "LENGTH",
+              "LEN"
+            ],
+            "LOWER": [
+              "LOWER",
+              "LCASE"
+            ],
+            "SUBSTR": [
+              "SUBSTR",
+              "SUBSTRING",
+              "MID"
+            ],
+            "TRIM": [
+              "TRIM",
+              "STRIP"
+            ],
+            "UPPER": [
+              "UPPER",
+              "UCASE"
+            ]
+          },
+          "group_by_keyword": "GROUP BY",
+          "gt_op": ">",
+          "gte_op": ">=",
+          "having_keyword": "HAVING",
+          "identifier_quote": "double",
+          "ilike_keyword": "ILIKE",
+          "in_keyword": "IN",
+          "intersect_keyword": "INTERSECT",
+          "is_keyword": "IS",
+          "join_cross_keyword": "CROSS JOIN",
+          "join_full_keyword": "FULL OUTER JOIN",
+          "join_inner_keyword": "INNER JOIN",
+          "join_left_keyword": "LEFT OUTER JOIN",
+          "join_right_keyword": "RIGHT OUTER JOIN",
+          "join_syntax": "ansi",
+          "like_keyword": "LIKE",
+          "limit_keyword": "HEAD",
+          "limit_syntax": "head_n",
+          "lt_op": "<",
+          "lte_op": "<=",
+          "mod_op": "MOD",
+          "mul_op": "*",
+          "neq_op": [
+            "<>",
+            "!="
+          ],
+          "not_keyword": "NOT",
+          "null_keyword": "NULL",
+          "null_literal": "NULL",
+          "null_safe_eq_op": "<=>",
+          "nulls_first_keyword": "NULLS FIRST",
+          "nulls_last_keyword": "NULLS LAST",
+          "order_by_keyword": "ORDER BY",
+          "order_by_position": "after_select",
+          "requires_semicolon": true,
+          "select_keyword": "SELECT",
+          "set_op_precedence": "except_intersect_tighter",
+          "statement_terminator": ";",
+          "string_quote": "single",
+          "sub_op": "-",
+          "then_keyword": "THEN",
+          "union_keyword": "UNION",
+          "when_keyword": "WHEN",
+          "where_keyword": "WHERE",
+          "wildcard_char": "star",
+          "with_keyword": "WITH"
+        }
+      }
+    }
+  ],
+  "failed_packages": [
+    {
+      "name": "informix_snow_headn_modfn",
+      "reason": "battery: battery failed for dialect 'informix_snow_headn_modfn': card: card conformance: 18 / 19 OK; failing: card_null_safe_eq"
+    },
+    {
+      "name": "mariadb_db2_ineq_concat",
+      "reason": "battery: battery failed for dialect 'mariadb_db2_ineq_concat': card: card conformance: 18 / 20 OK; failing: card_top_n, card_cast_double_colon"
+    }
+  ],
+  "failed_specs": [],
+  "finished_at": "2026-04-27T20:57:06.954388+00:00",
+  "id": "20260427T204607-2a087798",
+  "packaged": [
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "firebird_click_wildcard",
+      "path": "/Users/albert/code/manysql/manysql/dialects/firebird_click_wildcard"
+    },
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "hive_teradata_nullsafe_wild",
+      "path": "/Users/albert/code/manysql/manysql/dialects/hive_teradata_nullsafe_wild"
+    },
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "redshift_informix_cmpops",
+      "path": "/Users/albert/code/manysql/manysql/dialects/redshift_informix_cmpops"
+    },
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "snowdb2_dotmod_nullsafe",
+      "path": "/Users/albert/code/manysql/manysql/dialects/snowdb2_dotmod_nullsafe"
+    },
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "oracle_maria_modconcat",
+      "path": "/Users/albert/code/manysql/manysql/dialects/oracle_maria_modconcat"
+    },
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "bigquery_sqlite_notprefix",
+      "path": "/Users/albert/code/manysql/manysql/dialects/bigquery_sqlite_notprefix"
+    },
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "sqlite_pg_concatmod_hybrid",
+      "path": "/Users/albert/code/manysql/manysql/dialects/sqlite_pg_concatmod_hybrid"
+    },
+    {
+      "files": [
+        "grammar.lark",
+        "lowering.py",
+        "overrides.py",
+        "passes.py",
+        "effects.py",
+        "semantics.json",
+        "metadata.json",
+        "spec.json",
+        "battery.json",
+        "examples.sql",
+        "__init__.py"
+      ],
+      "grammar_ok": true,
+      "lowering_ok": true,
+      "name": "clickhouse_oracle_samplelimit",
+      "path": "/Users/albert/code/manysql/manysql/dialects/clickhouse_oracle_samplelimit"
+    }
+  ],
+  "started_at": "2026-04-27T20:46:07.312994+00:00"
+}

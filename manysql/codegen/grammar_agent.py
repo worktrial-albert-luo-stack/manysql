@@ -32,9 +32,13 @@ from typing import Optional
 from manysql.codegen.grammar_emit import emit_grammar
 from manysql.codegen.parse_battery import (
     BatteryItem,
+    RejectionBatteryItem,
+    RejectionReport,
     ValidationReport,
     build_parse_battery,
+    build_rejection_battery,
     validate_grammar,
+    validate_rejection_battery,
 )
 from manysql.llm.client import LLMClient, LLMError, NullLLMClient
 from manysql.spec.dialect import DialectSpec
@@ -46,6 +50,7 @@ class GrammarAttempt:
     source: str  # "deterministic" | "llm"
     grammar: str
     report: ValidationReport
+    rejection_report: Optional[RejectionReport] = None
 
 
 @dataclass(frozen=True)
@@ -53,10 +58,15 @@ class GrammarAgentResult:
     grammar: str
     report: ValidationReport
     attempts: list[GrammarAttempt] = field(default_factory=list)
+    rejection_items: list[RejectionBatteryItem] = field(default_factory=list)
+    rejection_report: Optional[RejectionReport] = None
 
     @property
     def ok(self) -> bool:
-        return self.report.ok
+        rejection_ok = (
+            self.rejection_report is None or self.rejection_report.ok
+        )
+        return self.report.ok and rejection_ok
 
 
 _GRAMMAR_SYSTEM_PROMPT = """You are a grammar engineer. You modify a Lark
@@ -82,19 +92,27 @@ Rules:
 """
 
 
-_GRAMMAR_POLISH_INSTRUCTION = (
-    "The current grammar already parses every battery query. Make small, "
-    "targeted refinements (clearer rule names where harmless, tighter "
-    "alternations, deduplicated terminals) WITHOUT changing the set of strings "
-    "the grammar accepts. Every battery query must still parse."
+_GRAMMAR_VERIFY_INSTRUCTION = (
+    "Verify that the grammar implements EVERY non-default surface knob from the\n"
+    "DialectSpec. For each axis below, the grammar must (a) accept the dialect's\n"
+    "spelling (exercised by the must-parse battery), and (b) REJECT the original\n"
+    "ANSI spelling (exercised by the must-reject battery). Remove any obsolete\n"
+    "branches from the deterministic baseline that still admit the ANSI form.\n"
+    "Specifically check: keyword renames, operator renames (eq/neq/lt/lte/gt/ge,\n"
+    "add/sub/mul/div/mod, concat, null-safe-eq), wildcard char, identifier and\n"
+    "string quote characters, NULL literal spelling, statement terminator, and\n"
+    "set-op precedence (parsed flat; precedence handled in lowering)."
 )
+
+
+_GRAMMAR_POLISH_INSTRUCTION = _GRAMMAR_VERIFY_INSTRUCTION
 
 
 def generate_grammar(
     spec: DialectSpec,
     *,
     llm_client: Optional[LLMClient] = None,
-    max_iterations: int = 3,
+    max_iterations: int = 5,
     force_llm: bool = False,
 ) -> GrammarAgentResult:
     """Produce a grammar that parses the parse battery, refining via LLM if needed.
@@ -114,24 +132,39 @@ def generate_grammar(
             handle.
     """
     items = build_parse_battery(spec)
+    rejection_items = build_rejection_battery(spec)
     grammar = emit_grammar(spec)
     report = validate_grammar(grammar, items)
+    rejection_report = validate_rejection_battery(grammar, rejection_items)
     attempts: list[GrammarAttempt] = [
         GrammarAttempt(
             iteration=0,
             source="deterministic",
             grammar=grammar,
             report=report,
+            rejection_report=rejection_report,
         )
     ]
     no_llm = llm_client is None or isinstance(llm_client, NullLLMClient)
-    if no_llm or (report.ok and not force_llm):
-        return GrammarAgentResult(grammar=grammar, report=report, attempts=attempts)
 
-    # Snapshot the last known-good (grammar, report) so we can revert if a
-    # forced LLM polish pass regresses against the battery.
-    last_good: Optional[tuple[str, "ValidationReport"]] = (
-        (grammar, report) if report.ok else None
+    def _both_ok(parse: ValidationReport, reject: RejectionReport) -> bool:
+        return parse.ok and reject.ok
+
+    if no_llm or (_both_ok(report, rejection_report) and not force_llm):
+        return GrammarAgentResult(
+            grammar=grammar,
+            report=report,
+            attempts=attempts,
+            rejection_items=rejection_items,
+            rejection_report=rejection_report,
+        )
+
+    # Snapshot the last known-good (grammar, report, rejection_report) so we
+    # can revert if a forced LLM polish pass regresses against either battery.
+    last_good: Optional[tuple[str, ValidationReport, RejectionReport]] = (
+        (grammar, report, rejection_report)
+        if _both_ok(report, rejection_report)
+        else None
     )
 
     for iteration in range(1, max_iterations + 1):
@@ -141,38 +174,50 @@ def generate_grammar(
                 grammar=grammar,
                 items=items,
                 report=report,
+                rejection_items=rejection_items,
+                rejection_report=rejection_report,
                 llm_client=llm_client,
-                polish=report.ok,
+                polish=_both_ok(report, rejection_report),
             )
         except LLMError:
             break
         new_report = validate_grammar(new_grammar, items)
+        new_rejection = validate_rejection_battery(new_grammar, rejection_items)
         attempts.append(
             GrammarAttempt(
                 iteration=iteration,
                 source="llm",
                 grammar=new_grammar,
                 report=new_report,
+                rejection_report=new_rejection,
             )
         )
-        if new_report.ok:
+        if _both_ok(new_report, new_rejection):
             grammar = new_grammar
             report = new_report
-            last_good = (grammar, report)
+            rejection_report = new_rejection
+            last_good = (grammar, report, rejection_report)
             # One passing LLM iteration is sufficient. For force_llm callers
-            # this is enough to prove the LLM contributed; for fix-mode the
-            # battery is satisfied.
+            # this is enough to prove the LLM contributed; for fix-mode both
+            # batteries are satisfied.
             break
         if last_good is not None:
             # We had a passing baseline (or earlier passing iteration) and the
             # LLM regressed. Don't keep a worse grammar around.
-            grammar, report = last_good
+            grammar, report, rejection_report = last_good
             break
         # Baseline was already failing; keep the LLM's text as the working
         # grammar so the next iteration sees the most recent attempt.
         grammar = new_grammar
         report = new_report
-    return GrammarAgentResult(grammar=grammar, report=report, attempts=attempts)
+        rejection_report = new_rejection
+    return GrammarAgentResult(
+        grammar=grammar,
+        report=report,
+        attempts=attempts,
+        rejection_items=rejection_items,
+        rejection_report=rejection_report,
+    )
 
 
 def _refine_with_llm(
@@ -181,14 +226,18 @@ def _refine_with_llm(
     grammar: str,
     items: list[BatteryItem],
     report: ValidationReport,
+    rejection_items: list[RejectionBatteryItem],
+    rejection_report: RejectionReport,
     llm_client: LLMClient,
     polish: bool = False,
 ) -> str:
-    """Send the LLM the spec + current grammar, asking for a fix or polish.
+    """Send the LLM the spec + current grammar + both batteries.
 
-    `polish=True` means the battery is currently passing and the caller is
-    forcing an LLM iteration; we tell the model to refine without changing
-    the language. Otherwise we send each failing battery item.
+    The LLM must produce a grammar that satisfies BOTH batteries:
+      - every parse-battery item must still parse
+      - every rejection-battery item must FAIL to parse
+    ``polish`` is informational; the verify-axis prompt is the same in both
+    branches so the model always sees the full task.
     """
     spec_summary = json.dumps(
         {
@@ -198,20 +247,34 @@ def _refine_with_llm(
         },
         indent=2,
     )
-    if polish:
-        task_block = (
-            f"{_GRAMMAR_POLISH_INSTRUCTION}\n\n"
-            f"Battery (all currently parse):\n"
-            + "\n".join(f"  - {item.label}: {item.source}" for item in items)
+    must_parse_block = "\n".join(
+        f"  - {item.label}: {item.source}" for item in items
+    )
+    if rejection_items:
+        must_reject_block = "\n".join(
+            f"  - {item.label}: {item.source}  # {item.reason}"
+            for item in rejection_items
         )
     else:
-        failure_block = "\n\n".join(
-            f"### {f.label}\nSQL:\n  {f.source}\nError:\n  {f.error}"
-            for f in report.failures
-        )
-        task_block = (
-            f"Parse-battery failures (must all parse after your fix):\n{failure_block}"
-        )
+        must_reject_block = "  (none — spec is at default on every rejection axis)"
+    parse_failure_block = "\n\n".join(
+        f"### parse-fail: {f.label}\nSQL:\n  {f.source}\nError:\n  {f.error}"
+        for f in report.failures
+    ) or "  (none)"
+    reject_failure_block = "\n\n".join(
+        f"### over-permissive: {f.label}\nSQL:\n  {f.source}\nReason:\n  {f.reason}"
+        for f in rejection_report.failures
+    ) or "  (none)"
+    task_block = (
+        f"{_GRAMMAR_VERIFY_INSTRUCTION}\n\n"
+        f"Must-parse battery (every item must parse against the final grammar):\n"
+        f"{must_parse_block}\n\n"
+        f"Must-reject battery (every item must FAIL to parse against the final grammar):\n"
+        f"{must_reject_block}\n\n"
+        f"Current parse-battery failures:\n{parse_failure_block}\n\n"
+        f"Current rejection-battery failures (grammar still accepts these "
+        f"reference-form strings, defeating the divergence):\n{reject_failure_block}"
+    )
     user = (
         f"DialectSpec:\n```json\n{spec_summary}\n```\n\n"
         f"Current grammar:\n```lark\n{grammar}\n```\n\n"

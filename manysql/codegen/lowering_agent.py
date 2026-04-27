@@ -30,6 +30,7 @@ from typing import Optional
 from lark import Lark
 from lark.exceptions import LarkError
 
+from manysql.codegen.config_emit import compose_semantic_config
 from manysql.codegen.grammar_emit import emit_grammar
 from manysql.codegen.ir_battery import (
     IRBatteryItem,
@@ -75,12 +76,20 @@ Rules:
 """
 
 
-_LOWERING_POLISH_INSTRUCTION = (
-    "The current lowering already produces the reference IR for every battery "
-    "query. Make small, targeted refinements (clearer helper names, removed "
-    "dead code, tightened type hints) WITHOUT changing the IR plans returned "
-    "for any battery query. The IR-equivalence battery must still pass."
+_LOWERING_VERIFY_INSTRUCTION = (
+    "Verify that the lowering implements EVERY non-default semantic axis from\n"
+    "the DialectSpec, producing the same IR plans as the reference dialect for\n"
+    "every battery query. Per axis: function-alias canonicalization (NVL/IFNULL\n"
+    "-> COALESCE, LEN -> LENGTH, etc.), set-op precedence (ANSI vs\n"
+    "EXCEPT_INTERSECT_TIGHTER, read from SemanticConfig.set_op_precedence),\n"
+    "operator overloads, identifier-quote stripping, and any structural surface\n"
+    "rewrites the deterministic emitter could not handle (CASE syntax, JOIN\n"
+    "syntax, LIMIT shape). The IR-equivalence battery is the ground truth: a\n"
+    "passing battery is sufficient and necessary."
 )
+
+
+_LOWERING_POLISH_INSTRUCTION = _LOWERING_VERIFY_INSTRUCTION
 
 
 def generate_lowering(
@@ -88,7 +97,7 @@ def generate_lowering(
     *,
     grammar_text: Optional[str] = None,
     llm_client: Optional[LLMClient] = None,
-    max_iterations: int = 3,
+    max_iterations: int = 5,
     force_llm: bool = False,
 ) -> LoweringAgentResult:
     """Produce a lowering module that satisfies the IR battery.
@@ -106,7 +115,7 @@ def generate_lowering(
     """
     grammar = grammar_text or emit_grammar(spec)
     items = build_ir_battery(spec)
-    semantics = spec.semantics.to_semantic_config()
+    semantics = compose_semantic_config(spec)
 
     try:
         deterministic_text = emit_lowering(spec)
@@ -273,11 +282,15 @@ def _refine_with_llm(
         },
         indent=2,
     )
+    battery_block = "\n".join(
+        f"  - {item.label}\n      ref:     {item.ref_sql}\n      dialect: {item.dialect_sql}"
+        for item in items
+    )
     if polish:
         task_block = (
-            f"{_LOWERING_POLISH_INSTRUCTION}\n\n"
-            f"Battery (all currently produce reference IR):\n"
-            + "\n".join(f"  - {item.label}: {item.ref_sql}" for item in items)
+            f"{_LOWERING_VERIFY_INSTRUCTION}\n\n"
+            f"IR battery (every item must lower to the reference plan):\n"
+            f"{battery_block}"
         )
     else:
         trees = _parse_failure_trees(grammar_text, report.divergences)
@@ -293,8 +306,10 @@ def _refine_with_llm(
             for d in report.divergences
         )
         task_block = (
-            "IR-equivalence battery divergences (the dialect plan must equal "
-            f"the reference plan):\n{failure_block}"
+            f"{_LOWERING_VERIFY_INSTRUCTION}\n\n"
+            f"IR battery (every item must lower to the reference plan):\n"
+            f"{battery_block}\n\n"
+            f"Current divergences (must be repaired):\n{failure_block}"
         )
     user = (
         f"DialectSpec:\n```json\n{spec_summary}\n```\n\n"

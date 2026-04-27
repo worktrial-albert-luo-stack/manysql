@@ -23,8 +23,15 @@ from __future__ import annotations
 
 import json
 
+from typing import Optional
+
 from manysql.codegen.ir_battery import IRBatteryItem, IREquivalenceReport
-from manysql.codegen.parse_battery import BatteryItem, ValidationReport
+from manysql.codegen.parse_battery import (
+    BatteryItem,
+    RejectionBatteryItem,
+    RejectionReport,
+    ValidationReport,
+)
 from manysql.spec.dialect import DialectSpec
 
 
@@ -34,6 +41,8 @@ def emit_battery_json(
     parse_report: ValidationReport,
     ir_items: list[IRBatteryItem],
     ir_report: IREquivalenceReport,
+    rejection_items: Optional[list[RejectionBatteryItem]] = None,
+    rejection_report: Optional[RejectionReport] = None,
 ) -> str:
     """Return JSON text for the dialect's ``battery.json``.
 
@@ -85,6 +94,31 @@ def emit_battery_json(
             },
         },
     }
+    if rejection_items is not None:
+        payload["rejection"] = {
+            "items": [
+                {"label": item.label, "source": item.source, "reason": item.reason}
+                for item in rejection_items
+            ],
+            "validation": {
+                "ok": rejection_report.ok if rejection_report is not None else True,
+                "summary": (
+                    rejection_report.summary()
+                    if rejection_report is not None
+                    else f"rejection battery: 0 / 0 OK"
+                ),
+                "over_permissive": [
+                    {
+                        "label": f.label,
+                        "source": f.source,
+                        "reason": f.reason,
+                    }
+                    for f in (
+                        rejection_report.failures if rejection_report is not None else []
+                    )
+                ],
+            },
+        }
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"
 
 

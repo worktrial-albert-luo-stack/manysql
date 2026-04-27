@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Optional
 
 from manysql.codegen.battery_emit import emit_battery_json, emit_examples_sql
+from manysql.codegen.card_conformance import (
+    CardConformanceReport,
+    build_card_examples,
+    validate_card_conformance,
+)
 from manysql.codegen.config_emit import emit_semantic_config
 from manysql.codegen.grammar_agent import (
     GrammarAgentResult,
@@ -73,6 +78,7 @@ class PackageWriteResult:
     written_files: list[str]
     grammar_result: Optional[GrammarAgentResult] = None
     lowering_result: Optional[LoweringAgentResult] = None
+    card_report: Optional[CardConformanceReport] = None
 
 
 def build_package_bundle(
@@ -82,10 +88,15 @@ def build_package_bundle(
     provider: str = "deterministic",
     lifecycle: str = "draft",
     llm_client: Optional[LLMClient] = None,
-    grammar_max_iterations: int = 3,
-    lowering_max_iterations: int = 3,
+    grammar_max_iterations: int = 5,
+    lowering_max_iterations: int = 5,
     force_llm: bool = False,
-) -> tuple[PackageBundle, GrammarAgentResult, LoweringAgentResult]:
+) -> tuple[
+    PackageBundle,
+    GrammarAgentResult,
+    LoweringAgentResult,
+    CardConformanceReport,
+]:
     """Produce all dialect-package files as text. No I/O.
 
     Returns the bundle plus both agent results so the caller can inspect
@@ -117,8 +128,13 @@ def build_package_bundle(
     )
     parse_items = grammar_result.report.items
     ir_items = lowering_result.report.items
+    final_grammar = (
+        grammar_result.grammar if grammar_result.ok else emit_grammar(spec)
+    )
+    card_examples = build_card_examples(spec)
+    card_report = validate_card_conformance(final_grammar, card_examples)
     bundle = PackageBundle(
-        grammar=grammar_result.grammar if grammar_result.ok else emit_grammar(spec),
+        grammar=final_grammar,
         lowering_py=lowering_text,
         overrides_py=emit_overrides(spec),
         passes_py=emit_passes(spec),
@@ -131,6 +147,7 @@ def build_package_bundle(
                 provider, grammar_result, lowering_result
             ),
             lifecycle=lifecycle,
+            card_warnings=card_report.warnings,
         ),
         spec_json=emit_spec_json(spec),
         init_py=_INIT_TEMPLATE.format(name=spec.name),
@@ -139,10 +156,12 @@ def build_package_bundle(
             parse_report=grammar_result.report,
             ir_items=ir_items,
             ir_report=lowering_result.report,
+            rejection_items=grammar_result.rejection_items,
+            rejection_report=grammar_result.rejection_report,
         ),
         examples_sql=emit_examples_sql(spec=spec, parse_items=parse_items),
     )
-    return bundle, grammar_result, lowering_result
+    return bundle, grammar_result, lowering_result, card_report
 
 
 def _emit_lowering_or_stub(spec: DialectSpec) -> str:
@@ -184,8 +203,8 @@ def write_dialect_package(
     lifecycle: str = "draft",
     overwrite: bool = False,
     llm_client: Optional[LLMClient] = None,
-    grammar_max_iterations: int = 3,
-    lowering_max_iterations: int = 3,
+    grammar_max_iterations: int = 5,
+    lowering_max_iterations: int = 5,
     require_battery_pass: bool = False,
     force_llm: bool = False,
 ) -> PackageWriteResult:
@@ -201,7 +220,7 @@ def write_dialect_package(
             the deterministic baseline for both grammar and lowering, even
             when the baseline already passes. Requires `llm_client`.
     """
-    bundle, grammar_result, lowering_result = build_package_bundle(
+    bundle, grammar_result, lowering_result, card_report = build_package_bundle(
         spec,
         model=model,
         provider=provider,
@@ -213,10 +232,19 @@ def write_dialect_package(
     )
     if require_battery_pass:
         failures: list[str] = []
-        if not grammar_result.ok:
+        if not grammar_result.report.ok:
             failures.append(f"grammar: {grammar_result.report.summary()}")
+        if (
+            grammar_result.rejection_report is not None
+            and not grammar_result.rejection_report.ok
+        ):
+            failures.append(
+                f"rejection: {grammar_result.rejection_report.summary()}"
+            )
         if not lowering_result.ok:
             failures.append(f"lowering: {lowering_result.report.summary()}")
+        if not card_report.ok:
+            failures.append(f"card: {card_report.summary()}")
         if failures:
             raise BatteryError(
                 f"battery failed for dialect {spec.name!r}: "
@@ -241,6 +269,7 @@ def write_dialect_package(
         written_files=written,
         grammar_result=grammar_result,
         lowering_result=lowering_result,
+        card_report=card_report,
     )
 
 

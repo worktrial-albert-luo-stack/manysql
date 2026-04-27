@@ -1,0 +1,314 @@
+{
+  "ir_equivalence": {
+    "items": [
+      {
+        "dialect_sql": "SELECT * FROM employees;",
+        "label": "scan_all",
+        "ref_sql": "SELECT * FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT id, name FROM employees;",
+        "label": "scan_subset",
+        "ref_sql": "SELECT id, name FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE dept_id == 10;",
+        "label": "filter_eq",
+        "ref_sql": "SELECT id FROM employees WHERE dept_id = 10"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE dept_id <> 10;",
+        "label": "filter_neq",
+        "ref_sql": "SELECT id FROM employees WHERE dept_id <> 10"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE dept_id IN (10, 20);",
+        "label": "filter_in",
+        "ref_sql": "SELECT id FROM employees WHERE dept_id IN (10, 20)"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE salary BETWEEN 80000 AND 120000;",
+        "label": "filter_between",
+        "ref_sql": "SELECT id FROM employees WHERE salary BETWEEN 80000 AND 120000"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE name LIKE 'A%';",
+        "label": "filter_like",
+        "ref_sql": "SELECT id FROM employees WHERE name LIKE 'A%'"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE dept_id IS NULL;",
+        "label": "filter_is_null",
+        "ref_sql": "SELECT id FROM employees WHERE dept_id IS NULL"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE dept_id IS NOT NULL;",
+        "label": "filter_is_not_null",
+        "ref_sql": "SELECT id FROM employees WHERE dept_id IS NOT NULL"
+      },
+      {
+        "dialect_sql": "SELECT id, salary + 1000 AS bumped FROM employees;",
+        "label": "project_arith",
+        "ref_sql": "SELECT id, salary + 1000 AS bumped FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT name || '!' AS shouted FROM employees;",
+        "label": "project_concat",
+        "ref_sql": "SELECT name || '!' AS shouted FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT id, CASE WHEN salary > 100000 THEN 'high' ELSE 'low' END AS tier FROM employees;",
+        "label": "project_case",
+        "ref_sql": "SELECT id, CASE WHEN salary > 100000 THEN 'high' ELSE 'low' END AS tier FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT e.id, d.name FROM employees e INNER JOIN departments d ON e.dept_id == d.id;",
+        "label": "join_inner",
+        "ref_sql": "SELECT e.id, d.name FROM employees e INNER JOIN departments d ON e.dept_id = d.id"
+      },
+      {
+        "dialect_sql": "SELECT e.id, d.name FROM employees e LEFT OUTER JOIN departments d ON e.dept_id == d.id;",
+        "label": "join_left",
+        "ref_sql": "SELECT e.id, d.name FROM employees e LEFT JOIN departments d ON e.dept_id = d.id"
+      },
+      {
+        "dialect_sql": "SELECT dept_id, COUNT(*) AS n FROM employees GROUP BY dept_id;",
+        "label": "agg_group_by",
+        "ref_sql": "SELECT dept_id, COUNT(*) AS n FROM employees GROUP BY dept_id"
+      },
+      {
+        "dialect_sql": "SELECT dept_id, COUNT(*) AS n FROM employees GROUP BY dept_id HAVING COUNT(*) > 1;",
+        "label": "agg_having",
+        "ref_sql": "SELECT dept_id, COUNT(*) AS n FROM employees GROUP BY dept_id HAVING COUNT(*) > 1"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees ORDER BY salary ASC;",
+        "label": "order_asc",
+        "ref_sql": "SELECT id FROM employees ORDER BY salary ASC"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees ORDER BY dept_id DESC NULLS LAST;",
+        "label": "order_desc_nulls_last",
+        "ref_sql": "SELECT id FROM employees ORDER BY dept_id DESC NULLS LAST"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees LIMIT 5;",
+        "label": "limit_only",
+        "ref_sql": "SELECT id FROM employees LIMIT 5"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees LIMIT 5 OFFSET 10;",
+        "label": "limit_offset",
+        "ref_sql": "SELECT id FROM employees LIMIT 5 OFFSET 10"
+      },
+      {
+        "dialect_sql": "SELECT DISTINCT dept_id FROM employees;",
+        "label": "distinct",
+        "ref_sql": "SELECT DISTINCT dept_id FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees UNION ALL SELECT id FROM departments;",
+        "label": "union_all",
+        "ref_sql": "SELECT id FROM employees UNION ALL SELECT id FROM departments"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE dept_id IN (SELECT id FROM departments);",
+        "label": "subq_in",
+        "ref_sql": "SELECT id FROM employees WHERE dept_id IN (SELECT id FROM departments)"
+      },
+      {
+        "dialect_sql": "WITH high AS (SELECT id FROM employees WHERE salary > 100000) SELECT * FROM high;",
+        "label": "cte_simple",
+        "ref_sql": "WITH high AS (SELECT id FROM employees WHERE salary > 100000) SELECT * FROM high"
+      },
+      {
+        "dialect_sql": "SELECT id, ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary) AS rn FROM employees;",
+        "label": "window_row_number",
+        "ref_sql": "SELECT id, ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary) AS rn FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT CONVERT(salary AS INT) FROM employees;",
+        "label": "cast_int",
+        "ref_sql": "SELECT CAST(salary AS INT) FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT CHAR_LENGTH(name) AS n FROM employees;",
+        "label": "axis_function_alias_length",
+        "ref_sql": "SELECT LENGTH(name) AS n FROM employees"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE salary MOD 100 == 0;",
+        "label": "axis_mod",
+        "ref_sql": "SELECT id FROM employees WHERE salary % 100 = 0"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees UNION ALL SELECT id FROM departments INTERSECT SELECT id FROM regions;",
+        "label": "axis_setop_precedence",
+        "ref_sql": "SELECT id FROM employees UNION ALL SELECT id FROM departments INTERSECT SELECT id FROM regions"
+      },
+      {
+        "dialect_sql": "SELECT id FROM employees WHERE dept_id <> 10;",
+        "label": "axis_comparison_neq",
+        "ref_sql": "SELECT id FROM employees WHERE dept_id <> 10"
+      }
+    ],
+    "validation": {
+      "divergences": [],
+      "ok": true,
+      "summary": "ir battery: 30 / 30 OK"
+    }
+  },
+  "parse": {
+    "items": [
+      {
+        "label": "scan_all",
+        "source": "SELECT * FROM employees;"
+      },
+      {
+        "label": "scan_subset",
+        "source": "SELECT id, name FROM employees;"
+      },
+      {
+        "label": "filter_eq",
+        "source": "SELECT id FROM employees WHERE dept_id == 10;"
+      },
+      {
+        "label": "filter_neq",
+        "source": "SELECT id FROM employees WHERE dept_id <> 10;"
+      },
+      {
+        "label": "filter_in",
+        "source": "SELECT id FROM employees WHERE dept_id IN (10, 20);"
+      },
+      {
+        "label": "filter_between",
+        "source": "SELECT id FROM employees WHERE salary BETWEEN 80000 AND 120000;"
+      },
+      {
+        "label": "filter_like",
+        "source": "SELECT id FROM employees WHERE name LIKE 'A%';"
+      },
+      {
+        "label": "filter_is_null",
+        "source": "SELECT id FROM employees WHERE dept_id IS NULL;"
+      },
+      {
+        "label": "filter_is_not_null",
+        "source": "SELECT id FROM employees WHERE dept_id IS NOT NULL;"
+      },
+      {
+        "label": "project_arith",
+        "source": "SELECT id, salary + 1000 AS bumped FROM employees;"
+      },
+      {
+        "label": "project_concat",
+        "source": "SELECT name || '!' AS shouted FROM employees;"
+      },
+      {
+        "label": "project_case",
+        "source": "SELECT id, CASE WHEN salary > 100000 THEN 'high' ELSE 'low' END AS tier FROM employees;"
+      },
+      {
+        "label": "join_inner",
+        "source": "SELECT e.id, d.name FROM employees e INNER JOIN departments d ON e.dept_id == d.id;"
+      },
+      {
+        "label": "join_left",
+        "source": "SELECT e.id, d.name FROM employees e LEFT OUTER JOIN departments d ON e.dept_id == d.id;"
+      },
+      {
+        "label": "agg_group_by",
+        "source": "SELECT dept_id, COUNT(*) AS n FROM employees GROUP BY dept_id;"
+      },
+      {
+        "label": "agg_having",
+        "source": "SELECT dept_id, COUNT(*) AS n FROM employees GROUP BY dept_id HAVING COUNT(*) > 1;"
+      },
+      {
+        "label": "order_asc",
+        "source": "SELECT id FROM employees ORDER BY salary ASC;"
+      },
+      {
+        "label": "order_desc_nulls_last",
+        "source": "SELECT id FROM employees ORDER BY dept_id DESC NULLS LAST;"
+      },
+      {
+        "label": "limit_only",
+        "source": "SELECT id FROM employees LIMIT 5;"
+      },
+      {
+        "label": "limit_offset",
+        "source": "SELECT id FROM employees LIMIT 5 OFFSET 10;"
+      },
+      {
+        "label": "distinct",
+        "source": "SELECT DISTINCT dept_id FROM employees;"
+      },
+      {
+        "label": "union_all",
+        "source": "SELECT id FROM employees UNION ALL SELECT id FROM departments;"
+      },
+      {
+        "label": "subq_in",
+        "source": "SELECT id FROM employees WHERE dept_id IN (SELECT id FROM departments);"
+      },
+      {
+        "label": "cte_simple",
+        "source": "WITH high AS (SELECT id FROM employees WHERE salary > 100000) SELECT * FROM high;"
+      },
+      {
+        "label": "window_row_number",
+        "source": "SELECT id, ROW_NUMBER() OVER (PARTITION BY dept_id ORDER BY salary) AS rn FROM employees;"
+      },
+      {
+        "label": "cast_int",
+        "source": "SELECT CONVERT(salary AS INT) FROM employees;"
+      },
+      {
+        "label": "axis_function_alias_length",
+        "source": "SELECT CHAR_LENGTH(name) AS n FROM employees;"
+      },
+      {
+        "label": "axis_mod",
+        "source": "SELECT id FROM employees WHERE salary MOD 100 == 0;"
+      },
+      {
+        "label": "axis_setop_precedence",
+        "source": "SELECT id FROM employees UNION ALL SELECT id FROM departments INTERSECT SELECT id FROM regions;"
+      },
+      {
+        "label": "axis_comparison_neq",
+        "source": "SELECT id FROM employees WHERE dept_id <> 10;"
+      }
+    ],
+    "validation": {
+      "failures": [],
+      "ok": true,
+      "summary": "parse battery: 30 / 30 OK"
+    }
+  },
+  "rejection": {
+    "items": [
+      {
+        "label": "reject_missing_semicolon",
+        "reason": "requires_semicolon=True; statement without terminator must reject",
+        "source": "SELECT id FROM employees"
+      },
+      {
+        "label": "reject_ansi_eq",
+        "reason": "eq_op='=='; ANSI = must reject",
+        "source": "SELECT id FROM employees WHERE dept_id = 10"
+      },
+      {
+        "label": "reject_ansi_mod",
+        "reason": "mod_op='MOD'; ANSI % must reject",
+        "source": "SELECT id FROM employees WHERE salary % 100 = 0"
+      }
+    ],
+    "validation": {
+      "ok": true,
+      "over_permissive": [],
+      "summary": "rejection battery: 3 / 3 OK"
+    }
+  }
+}

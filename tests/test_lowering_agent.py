@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from manysql.codegen.config_emit import compose_semantic_config
 from manysql.codegen.grammar_emit import emit_grammar
 from manysql.codegen.ir_battery import (
     build_ir_battery,
@@ -74,7 +75,7 @@ def test_ir_battery_passes_for_mild_postgres_ish() -> None:
     report = validate_lowering(
         grammar_text=grammar,
         lowering_module=module,
-        semantics=spec.semantics.to_semantic_config(),
+        semantics=compose_semantic_config(spec),
         items=items,
     )
     assert report.ok, report.summary()
@@ -88,7 +89,7 @@ def test_ir_battery_passes_for_moderate_keyword_swap() -> None:
     report = validate_lowering(
         grammar_text=grammar,
         lowering_module=module,
-        semantics=spec.semantics.to_semantic_config(),
+        semantics=compose_semantic_config(spec),
         items=items,
     )
     assert report.ok, report.summary()

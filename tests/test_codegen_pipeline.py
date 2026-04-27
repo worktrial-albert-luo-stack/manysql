@@ -34,7 +34,7 @@ from manysql.storage import CATALOG, schema_of, seed_datasets
 
 def test_bundle_for_default_spec_matches_reference_shape() -> None:
     spec = EXAMPLE_SPECS["mild_postgres_ish"]
-    bundle, grammar_result, lowering_result = build_package_bundle(spec)
+    bundle, grammar_result, lowering_result, _card = build_package_bundle(spec)
     assert grammar_result.ok, grammar_result.report.summary()
     assert lowering_result.ok, lowering_result.report.summary()
     assert "start: statement" in bundle.grammar

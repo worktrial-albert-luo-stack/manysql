@@ -71,6 +71,20 @@ class StringConcatOp(str, Enum):
     CONCAT_FN_ONLY = "CONCAT_only"  # MySQL strict
 
 
+class SetOpPrecedenceMode(str, Enum):
+    """Runtime grouping precedence between UNION / INTERSECT / EXCEPT.
+
+    Mirrors ``manysql.spec.dialect.SetOpPrecedence`` but lives here so the
+    executor's lowering can consult it directly without importing codegen-
+    side enums. ``ANSI`` (default) folds set-op branches left-to-right with
+    equal precedence; ``EXCEPT_INTERSECT_TIGHTER`` folds INTERSECT/EXCEPT
+    runs first, then UNIONs around them (Postgres / DB2 / SQL Server).
+    """
+
+    ANSI = "ansi"
+    EXCEPT_INTERSECT_TIGHTER = "except_intersect_tighter"
+
+
 class CoercionRule(BaseModel):
     """One row of the implicit-coercion matrix.
 
@@ -144,6 +158,12 @@ class SemanticConfig(BaseModel):
     set_op_default: SetOpDefault = Field(
         default=SetOpDefault.DISTINCT,
         description="Default for UNION/INTERSECT/EXCEPT when ALL/DISTINCT is omitted.",
+    )
+    set_op_precedence: SetOpPrecedenceMode = Field(
+        default=SetOpPrecedenceMode.ANSI,
+        description="ANSI: equal precedence, left-to-right. "
+        "EXCEPT_INTERSECT_TIGHTER: Postgres/DB2/SQL Server style — "
+        "INTERSECT and EXCEPT bind tighter than UNION.",
     )
 
     # --- Boolean / aggregation edge cases ---

@@ -1,0 +1,52 @@
+{
+  "array_base_index": 0,
+  "boolean_truthiness": "strict",
+  "count_distinct_null": "excluded",
+  "division_by_zero": "null",
+  "function_aliases": {
+    "COALESCE": [
+      "COALESCE",
+      "IFNULL",
+      "NVL"
+    ],
+    "LENGTH": [
+      "CHAR_LENGTH",
+      "LENGTH",
+      "LEN"
+    ],
+    "LOWER": [
+      "LOWER",
+      "LCASE"
+    ],
+    "SUBSTRING": [
+      "SUBSTR",
+      "SUBSTRING"
+    ],
+    "TRIM": [
+      "TRIM",
+      "BTRIM"
+    ],
+    "UPPER": [
+      "UPPER",
+      "UCASE"
+    ]
+  },
+  "group_by_accepts_select_aliases": true,
+  "identifier_case_fold": "preserve",
+  "ilike_supported": false,
+  "implicit_coercion": [],
+  "integer_division": "truncate",
+  "keyword_aliases": {},
+  "like_case_sensitive": false,
+  "notes": null,
+  "null_order_default_asc": "last",
+  "null_order_default_desc": "first",
+  "null_safe_eq_supported": true,
+  "quoted_identifiers_case_sensitive": true,
+  "select_resolves_through_group_by": false,
+  "set_op_default": "distinct",
+  "set_op_precedence": "except_intersect_tighter",
+  "string_concat_op": "CONCAT_only",
+  "sum_of_empty_returns_null": true,
+  "window_default_frame": "range_unbounded_to_current"
+}

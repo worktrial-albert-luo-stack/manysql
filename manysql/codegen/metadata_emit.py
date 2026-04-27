@@ -11,6 +11,7 @@ import datetime as dt
 import json
 from typing import Optional
 
+from manysql.codegen.card_conformance import CardWarning
 from manysql.spec.dialect import DialectSpec
 
 
@@ -24,10 +25,11 @@ def emit_metadata(
     retry_log: Optional[list[dict[str, object]]] = None,
     created_at: Optional[str] = None,
     updated_at: Optional[str] = None,
+    card_warnings: Optional[list[CardWarning]] = None,
 ) -> str:
     """Return the JSON text for the dialect's metadata.json."""
     now = _isoformat(dt.datetime.now(tz=dt.timezone.utc))
-    payload = {
+    payload: dict[str, object] = {
         "lifecycle": lifecycle,
         "generation": {
             "model": model,
@@ -37,6 +39,10 @@ def emit_metadata(
             "created_at": created_at or now,
             "updated_at": updated_at or now,
         },
+        "card_warnings": [
+            {"label": w.label, "source": w.source, "error": w.error}
+            for w in (card_warnings or [])
+        ],
     }
     _ = spec  # kept for future provenance hooks
     return json.dumps(payload, indent=2, sort_keys=True) + "\n"

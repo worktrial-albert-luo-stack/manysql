@@ -150,7 +150,7 @@ cast_expr: "CAST"i "(" expr "AS"i type_name ")"
 
 // --- terminals ---
 
-IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/
+IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*|"[^"]+"/
 NUMBER: /\d+(\.\d+)?([eE][-+]?\d+)?/
 STRING: /'([^'\\]|\\.|'')*'/
 INT: /\d+/

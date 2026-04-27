@@ -123,6 +123,25 @@ class WildcardChar(str, Enum):
     AT = "at"                # SELECT @
 
 
+class SetOpPrecedence(str, Enum):
+    """Surface-level grouping precedence between UNION / INTERSECT / EXCEPT.
+
+    The IR is unaffected (set-op nodes carry their own kind); this knob only
+    decides how a *flat* sequence of set-op branches in the surface SQL
+    associates when no parentheses are present.
+
+    - ``ANSI`` (default): all three set ops have the same precedence and
+      associate left-to-right, exactly as the reference grammar emits.
+    - ``EXCEPT_INTERSECT_TIGHTER``: ``INTERSECT`` and ``EXCEPT`` bind more
+      tightly than ``UNION``, so ``A UNION B INTERSECT C`` parses as
+      ``A UNION (B INTERSECT C)``. This matches Postgres / DB2 / SQL Server
+      and is a common real-world divergence.
+    """
+
+    ANSI = "ansi"
+    EXCEPT_INTERSECT_TIGHTER = "except_intersect_tighter"
+
+
 class SurfaceSpec(BaseModel):
     """Lexical and syntactic divergences from the reference.
 
@@ -198,6 +217,7 @@ class SurfaceSpec(BaseModel):
     limit_syntax: LimitSyntax = LimitSyntax.LIMIT_OFFSET
     cast_syntax: CastSyntax = CastSyntax.CAST_AS
     case_syntax: CaseSyntax = CaseSyntax.CASE_WHEN
+    set_op_precedence: SetOpPrecedence = SetOpPrecedence.ANSI
 
     # ---- Function aliases ----
     function_aliases: dict[str, list[str]] = Field(
@@ -282,6 +302,7 @@ __all__ = [
     "NullLiteral",
     "OrderByPosition",
     "SemanticDivergences",
+    "SetOpPrecedence",
     "StringQuote",
     "SurfaceSpec",
     "WildcardChar",

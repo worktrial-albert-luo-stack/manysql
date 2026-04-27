@@ -166,7 +166,23 @@ def _first_child(node: Tree, name: str) -> Optional[Tree]:
 
 
 def _identifier(token: Token) -> str:
-    return str(token).strip('"')
+    """Return the bare identifier text, stripping any quoting characters.
+
+    The reference dialect uses ANSI double quotes; generated dialects may
+    fold the quoted form into the same ``IDENTIFIER`` terminal (backtick
+    or bracket). All three pairs are stripped here so the lowering doesn't
+    have to know which dialect emitted the token.
+    """
+    text = str(token)
+    if len(text) >= 2:
+        first, last = text[0], text[-1]
+        if first == '"' and last == '"':
+            return text[1:-1]
+        if first == "`" and last == "`":
+            return text[1:-1]
+        if first == "[" and last == "]":
+            return text[1:-1]
+    return text
 
 
 def _has_token(node: Tree, value: str) -> bool:
@@ -186,6 +202,19 @@ class Lowerer:
         self.catalog = catalog
         self.config = config
         self._cte_bindings: dict[str, tuple[ColumnSchema, ...]] = {}
+        # Build the inverse map: surface alias -> canonical IR name. The
+        # ``function_aliases`` knob is keyed by canonical name with a list
+        # of accepted surface spellings; we want O(1) lookup the other way.
+        self._function_alias_inverse: dict[str, str] = {}
+        for canonical, aliases in (
+            getattr(config, "function_aliases", {}) or {}
+        ).items():
+            for alias in aliases:
+                self._function_alias_inverse[alias.upper()] = canonical.upper()
+
+    def _canonicalize_function_name(self, name: str) -> str:
+        """Map a surface-form function name back to its canonical IR name."""
+        return self._function_alias_inverse.get(name, name)
 
     def lower_statement(self, node: Tree) -> Plan:
         # statement: with_clause? query_expr
@@ -276,25 +305,97 @@ class Lowerer:
             if distinct:
                 plan = Distinct(input=plan)
         else:
-            plan = self.lower_select_core(cores[0])
-            for branch in branches:
-                op_node = branch.children[0]
-                right_core = branch.children[1]
-                assert isinstance(op_node, Tree)
-                assert isinstance(right_core, Tree) and right_core.data == "select_core"
-                right = self.lower_select_core(right_core)
-                kind = {
-                    "union": SetOpKind.UNION,
-                    "intersect": SetOpKind.INTERSECT,
-                    "except_": SetOpKind.EXCEPT,
-                }[op_node.data]
-                all_mode = _has_token(op_node, "ALL")
-                plan = SetOp(kind=kind, left=plan, right=right, all=all_mode)
+            plan = self._fold_set_op_branches(cores[0], branches)
             if order_node is not None:
                 plan = self._lower_order_by(plan, order_node)
 
         if limit_node is not None:
             plan = self._lower_limit(plan, limit_node)
+        return plan
+
+    def _fold_set_op_branches(
+        self, first_core: Tree, branches: list[Tree]
+    ) -> Plan:
+        """Combine ``select_core (set_op_branch)*`` into a single SetOp tree.
+
+        The grammar is intentionally flat (all set ops parse left-associative
+        with equal precedence). Two folding strategies are supported:
+
+        - ``ANSI`` (default): straight left-fold, matching the reference's
+          historical behavior and the SQL standard.
+        - ``EXCEPT_INTERSECT_TIGHTER``: precedence climb. ``A UNION B INTERSECT
+          C`` becomes ``Union(A, Intersect(B, C))`` rather than the ANSI
+          ``Intersect(Union(A, B), C)``. This is the Postgres / DB2 / SQL
+          Server convention.
+
+        Both strategies operate on the same flat parse tree, so the grammar
+        doesn't need to be restructured per dialect — only the lowering does.
+        """
+        from manysql.spec.semantics import SetOpPrecedenceMode
+
+        ops: list[tuple[SetOpKind, bool, Tree]] = []
+        for branch in branches:
+            op_node = branch.children[0]
+            right_core = branch.children[1]
+            assert isinstance(op_node, Tree)
+            assert isinstance(right_core, Tree) and right_core.data == "select_core"
+            kind = {
+                "union": SetOpKind.UNION,
+                "intersect": SetOpKind.INTERSECT,
+                "except_": SetOpKind.EXCEPT,
+            }[op_node.data]
+            all_mode = _has_token(op_node, "ALL")
+            ops.append((kind, all_mode, right_core))
+
+        precedence = getattr(
+            self.config, "set_op_precedence", SetOpPrecedenceMode.ANSI
+        )
+        if precedence == SetOpPrecedenceMode.EXCEPT_INTERSECT_TIGHTER:
+            return self._fold_with_tighter_inner(first_core, ops)
+        return self._fold_left_to_right(first_core, ops)
+
+    def _fold_left_to_right(
+        self,
+        first_core: Tree,
+        ops: list[tuple[SetOpKind, bool, Tree]],
+    ) -> Plan:
+        plan: Plan = self.lower_select_core(first_core)
+        for kind, all_mode, right_core in ops:
+            right = self.lower_select_core(right_core)
+            plan = SetOp(kind=kind, left=plan, right=right, all=all_mode)
+        return plan
+
+    def _fold_with_tighter_inner(
+        self,
+        first_core: Tree,
+        ops: list[tuple[SetOpKind, bool, Tree]],
+    ) -> Plan:
+        # Split the flat branch list at every UNION; each segment is the
+        # left-fold of a consecutive INTERSECT/EXCEPT run starting from the
+        # previous UNION's RHS (or the very first SELECT). Then left-fold
+        # UNION across the resulting segments.
+        segments: list[Plan] = []
+        union_alls: list[bool] = []
+        current: Plan = self.lower_select_core(first_core)
+        for kind, all_mode, right_core in ops:
+            right = self.lower_select_core(right_core)
+            if kind == SetOpKind.UNION:
+                segments.append(current)
+                union_alls.append(all_mode)
+                current = right
+            else:
+                current = SetOp(
+                    kind=kind, left=current, right=right, all=all_mode
+                )
+        segments.append(current)
+        plan = segments[0]
+        for i, all_mode in enumerate(union_alls):
+            plan = SetOp(
+                kind=SetOpKind.UNION,
+                left=plan,
+                right=segments[i + 1],
+                all=all_mode,
+            )
         return plan
 
     def lower_select_core(self, node: Tree) -> Plan:
@@ -930,7 +1031,11 @@ class ExprLowerer:
 
     def _function_call(self, node: Tree) -> Expr:
         name_token = node.children[0]
-        name = _identifier(name_token).upper()  # type: ignore[arg-type]
+        raw_name = _identifier(name_token).upper()  # type: ignore[arg-type]
+        # Canonicalize alias spellings back to the IR name. This is what
+        # makes the IR battery's plan-equality check pass for dialects that
+        # rename common functions (e.g. ``NVL`` -> ``COALESCE``).
+        name = self.lowerer._canonicalize_function_name(raw_name)
         args_node = node.children[1]
         filter_node: Optional[Tree] = None
         over_node: Optional[Tree] = None

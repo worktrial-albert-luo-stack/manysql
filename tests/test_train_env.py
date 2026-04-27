@@ -108,6 +108,25 @@ def test_runtime_run_handles_empty_sql(runtime: DialectRuntime) -> None:
     assert res.error_class == "empty"
 
 
+def test_runtime_parse_error_humanizes_anon_terminals(runtime: DialectRuntime) -> None:
+    # Lark labels operators defined as inline literals (``<>``, ``<=``,
+    # ``||``...) as ``__ANON_N``. The model can't act on that, so the
+    # runtime swaps them for the literal surface form before returning.
+    # Force a parse error in a position where Lark surfaces operator
+    # alternatives in its "Expected one of" list.
+    res = runtime.run("SELECT name employees")
+    assert not res.exec_result.success
+    assert res.error_class == "parse"
+    err = res.exec_result.error or ""
+    assert "__ANON_" not in err, f"unhumanized terminal in error: {err!r}"
+    # Concrete operator literals from the grammar should now be visible.
+    # At least one should land in the "Expected one of" list for any
+    # mid-expression parse error.
+    assert any(op in err for op in ("<=", ">=", "<>", "||", "!=")), (
+        f"expected at least one operator literal in error: {err!r}"
+    )
+
+
 def test_runtime_system_prompt_contains_dialect_card_and_schema(runtime: DialectRuntime) -> None:
     sp = runtime.system_prompt()
     assert "aggressive_alien" in sp

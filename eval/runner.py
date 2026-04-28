@@ -342,7 +342,7 @@ def _run_one_question(
             break  # don't keep retrying on transport errors
 
         sql = extract_sql(llm_resp.text)
-        exec_res = executor.execute(sql)
+        exec_res = executor.execute(sql, question=q)
         attempts.append(
             Attempt(
                 sql=sql,
@@ -412,7 +412,7 @@ def _evaluate_reference(
     if ref_sql is None:
         return None, None, None
 
-    ref_exec = executor.execute(ref_sql)
+    ref_exec = executor.execute(ref_sql, question=q)
     if not ref_exec.success:
         # Bench infra bug, not the LLM's fault. Surface it but don't crash.
         return ref_sql, ref_exec, None

@@ -10,10 +10,10 @@ from eval.executors.base import SqlExecutor
 def get_executor(name: str, **kwargs: Any) -> SqlExecutor:
     """Resolve a backend name to a constructed (but not yet `setup()`'d) executor.
 
-    Names: 'sqlite' (default), 'tinybird', 'synthetic'.
+    Names: 'sqlite' (default), 'tinybird', 'synthetic', 'bird'.
 
     Imports are deliberately deferred so that selecting `sqlite` doesn't pull
-    in tinybird/synthetic optional dependencies.
+    in tinybird/synthetic/BIRD optional dependencies.
     """
     name = name.lower()
     if name == "sqlite":
@@ -28,8 +28,15 @@ def get_executor(name: str, **kwargs: Any) -> SqlExecutor:
         from eval.executors.synthetic_executor import SyntheticExecutor  # noqa: PLC0415
 
         return SyntheticExecutor(**kwargs)
+    if name == "bird":
+        from eval.executors.bird_sqlite_executor import (  # noqa: PLC0415
+            BirdSqliteExecutor,
+        )
+
+        return BirdSqliteExecutor(**kwargs)
     raise ValueError(
-        f"Unknown backend {name!r}. Choose one of: sqlite, tinybird, synthetic"
+        f"Unknown backend {name!r}. Choose one of: sqlite, tinybird, "
+        f"synthetic, bird"
     )
 
 

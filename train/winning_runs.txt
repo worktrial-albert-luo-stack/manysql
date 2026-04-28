@@ -87,6 +87,55 @@ CUDA_VISIBLE_DEVICES=7 nohup bash train/run_grpo_sql.sh \
     > /tmp/grpo_synsql_qwen3_10dialects_abc.log 2>&1 &
 
 ##############################################################################
+# 5 + 6.  Synsql, gen-2 dialects, DDP-3 (3-rank colocate vLLM, no Unsloth)
+#     Re-runs of 3 + 4 with the second-generation dialects (commit ee211c2:
+#     bigquery_sqlite_notprefix dropped, 9 others kept) on the multi-GPU
+#     pipeline. Bypass run_grpo_sql_ddp.sh because in trl-0.22 colocate mode
+#     the launcher's reserved "vLLM GPU" is unused -- driving accelerate
+#     launch directly with --num_processes=3 utilises all 3 GPUs.
+#
+#     Required additions to train/grpo_sql_distributed.py for this session:
+#       - --generator synsql (was wikisql/bird/golden/eval_suite only)
+#       - --lr-scheduler-type (was hardcoded "linear")
+#       - --temperature       (was hardcoded 1.0; default now 1.6 to match
+#                              train/grpo_sql.py:GRPOConfig)
+#
+#     trl-0.22 invariant for DDP: per_device_bs * num_processes * grad_accum
+#     must divide num_generations. With 3 ranks and num_gens=6 we use
+#     per_device_bs=2 -> generation_batch=6 = 1 prompt x 6 gens, matching
+#     the single-GPU runs above.
+##############################################################################
+
+# 5.  Synsql, 1-dialect (snowflake_clone), DDP-3 on GPUs 3,4,5.
+CUDA_VISIBLE_DEVICES=3,4,5 \
+HF_HOME=/tmp/hf-home HF_DATASETS_CACHE=/tmp/hf-datasets \
+nohup /tmp/venv-gpu/bin/python -m accelerate.commands.launch \
+    --num_processes 3 --main_process_port 29501 \
+    -m train.grpo_sql_distributed \
+    --generator synsql \
+    --dialects snowflake_clone \
+    --max-steps 500 --num-generations 6 --per-device-train-batch-size 2 \
+    --lr-scheduler-type cosine --save-steps 250 \
+    --max-seq-length 6144 --no-wandb \
+    --output-dir /workspace/manysql/outputs/grpo_qwen3_4b_sql_synsql_snowflake_gen2_ddp3 \
+    > /tmp/grpo_synsql_qwen3_snowflake_gen2_ddp3.log 2>&1 &
+
+# 6.  Synsql, 10-dialect (snowflake_clone + 9 newest from commit ee211c2),
+#     DDP-3 on GPUs 0,1,2.
+CUDA_VISIBLE_DEVICES=0,1,2 \
+HF_HOME=/tmp/hf-home HF_DATASETS_CACHE=/tmp/hf-datasets \
+nohup /tmp/venv-gpu/bin/python -m accelerate.commands.launch \
+    --num_processes 3 --main_process_port 29500 \
+    -m train.grpo_sql_distributed \
+    --generator synsql \
+    --dialects snowflake_clone,clickhouse_oracle_samplelimit,db2_oracle_fetchfirst,firebird_click_wildcard,hive_teradata_nullsafe_wild,informix_firebird_firstn,oracle_maria_modconcat,redshift_informix_cmpops,snowdb2_dotmod_nullsafe,sqlite_pg_concatmod_hybrid \
+    --max-steps 500 --num-generations 6 --per-device-train-batch-size 2 \
+    --lr-scheduler-type cosine --save-steps 250 \
+    --max-seq-length 6144 --no-wandb \
+    --output-dir /workspace/manysql/outputs/grpo_qwen3_4b_sql_synsql_10dialects_gen2_ddp3 \
+    > /tmp/grpo_synsql_qwen3_10dialects_gen2_ddp3.log 2>&1 &
+
+##############################################################################
 # Eval: serve LoRA + base, run 50-question synthetic backend.
 # Notes from this session that bit us before they worked:
 #   - HF_HOME=/tmp/hf-home so the model is read from the existing cache (the

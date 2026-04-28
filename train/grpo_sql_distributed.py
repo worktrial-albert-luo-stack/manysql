@@ -175,12 +175,28 @@ class DistributedTrainArgs:
     bird_no_download: bool = False
     bird_max_db_bytes: int = 500 * 1024 * 1024
     bird_max_rows_per_table: int = 200_000
+    # SynSQL-2.5M knobs (only used with --generator synsql).
+    # Mirror of train.grpo_sql.TrainArgs so the shared
+    # build_runtimes_and_tasks helper duck-types cleanly.
+    synsql_size: int = 1000
+    synsql_split: str = "train"
+    synsql_seed: int = 0
+    synsql_sample_rows: int = 3
+    synsql_complexity: str = "simple,moderate"
+    synsql_start_index: int | None = None
+    synsql_db_dir: str | None = None
+    synsql_no_download: bool = False
+    synsql_max_rows_per_table: int = 200_000
     # ---- rewards ----
     reward_mode: str = "discounted"
     discount_factor: float = 0.9
     max_turns: int = 5
     # ---- trainer ----
     learning_rate: float = 5e-6
+    lr_scheduler_type: str = "linear"
+    # Match train.grpo_sql's hardcoded GRPO temperature so DDP rollouts
+    # have the same exploration as the single-GPU winning runs.
+    temperature: float = 1.6
     per_device_train_batch_size: int = 4  # >= num_generations (trl 0.22 invariant)
     gradient_accumulation_steps: int = 1
     num_generations: int = 4
@@ -251,14 +267,16 @@ def parse_args() -> DistributedTrainArgs:
     p.add_argument(
         "--generator",
         default=defaults.generator,
-        choices=["golden", "eval_suite", "wikisql", "bird"],
+        choices=["golden", "eval_suite", "wikisql", "bird", "synsql"],
         help=(
             "Task source. golden = cross-dialect translation on the "
             "5-table manysql catalog; eval_suite = NL->SQL benchmark "
             "questions on github_events; wikisql = NL->SQL on Wikipedia "
             "tables (use --wikisql-size to subset); bird = NL->SQL on "
             "multi-table BIRD-SQL databases (use --bird-size; downloads "
-            "~5GB of SQLite DBs on first run)."
+            "~5GB of SQLite DBs on first run); synsql = NL->SQL on the "
+            "SynSQL-2.5M corpus (use --synsql-size to subset; streams "
+            "from the 9.36GB data.json into ~/.cache/manysql/synsql)."
         ),
     )
     p.add_argument(
@@ -331,6 +349,63 @@ def parse_args() -> DistributedTrainArgs:
         default=defaults.bird_max_rows_per_table,
         help="Cap BIRD source tables to this many rows (0 = no cap).",
     )
+    # SynSQL-2.5M knobs (only used with --generator synsql).
+    p.add_argument(
+        "--synsql-size",
+        type=int,
+        default=defaults.synsql_size,
+        help=(
+            "Number of SynSQL-2.5M examples to sample. Streams just "
+            "enough of the 9.36GB data.json to collect this many items."
+        ),
+    )
+    p.add_argument(
+        "--synsql-split",
+        default=defaults.synsql_split,
+        choices=["train", "dev", "test"],
+        help=(
+            "SynSQL split. The corpus has no built-in partition; we "
+            "carve mutually-exclusive slices by absolute item index "
+            "(see train.env.synsql)."
+        ),
+    )
+    p.add_argument("--synsql-seed", type=int, default=defaults.synsql_seed)
+    p.add_argument(
+        "--synsql-sample-rows",
+        type=int,
+        default=defaults.synsql_sample_rows,
+        help="How many sample rows to embed in each SynSQL user prompt.",
+    )
+    p.add_argument(
+        "--synsql-complexity",
+        default=defaults.synsql_complexity,
+        help=(
+            "Comma-separated SynSQL sql_complexity levels to include "
+            "(simple, moderate, complex, 'highly complex')."
+        ),
+    )
+    p.add_argument(
+        "--synsql-start-index",
+        type=int,
+        default=defaults.synsql_start_index,
+        help="Skip the first K items of data.json before complexity filtering.",
+    )
+    p.add_argument(
+        "--synsql-db-dir",
+        default=defaults.synsql_db_dir,
+        help="Override the SynSQL DB directory (else autodetect/auto-download).",
+    )
+    p.add_argument(
+        "--synsql-no-download",
+        action="store_true",
+        help="Disable SynSQL auto-download of databases.zip.",
+    )
+    p.add_argument(
+        "--synsql-max-rows-per-table",
+        type=int,
+        default=defaults.synsql_max_rows_per_table,
+        help="Cap SynSQL source tables to this many rows (0 = no cap).",
+    )
     # ---- rewards ----
     p.add_argument(
         "--reward-mode",
@@ -351,6 +426,24 @@ def parse_args() -> DistributedTrainArgs:
     )
     # ---- trainer ----
     p.add_argument("--learning-rate", type=float, default=defaults.learning_rate)
+    p.add_argument(
+        "--lr-scheduler-type",
+        default=defaults.lr_scheduler_type,
+        choices=["linear", "cosine", "constant", "constant_with_warmup"],
+        help=(
+            "HF Trainer lr scheduler. linear (default) decays to 0 by "
+            "max_steps; cosine holds higher LR longer."
+        ),
+    )
+    p.add_argument(
+        "--temperature",
+        type=float,
+        default=defaults.temperature,
+        help=(
+            "GRPO rollout sampling temperature. Default 1.6 matches the "
+            "single-GPU train.grpo_sql winning-run hyperparam set."
+        ),
+    )
     p.add_argument(
         "--per-device-train-batch-size",
         type=int,
@@ -638,12 +731,12 @@ def main() -> None:
     # vllm <-> transformers compatibility today).
     grpo_config = GRPOConfig(
         # ---- generation ----
-        temperature=1.0,
+        temperature=args.temperature,
         # ---- optim ----
         learning_rate=args.learning_rate,
         weight_decay=0.001,
         warmup_ratio=0.1,
-        lr_scheduler_type="linear",
+        lr_scheduler_type=args.lr_scheduler_type,
         optim="paged_adamw_8bit" if args.load_in_4bit else "adamw_torch",
         bf16=args.bf16,
         # ---- batching / GRPO ----

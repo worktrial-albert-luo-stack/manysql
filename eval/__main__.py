@@ -103,9 +103,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # Execution backend
     p.add_argument(
         "--backend",
-        choices=["sqlite", "tinybird", "synthetic"],
+        choices=["sqlite", "tinybird", "synthetic", "bird"],
         default="sqlite",
-        help="SQL execution backend (default: sqlite).",
+        help=(
+            "SQL execution backend (default: sqlite). "
+            "Choose 'bird' to evaluate against a subset of BIRD-SQL; "
+            "see --bird-* flags for sizing the subset."
+        ),
     )
     p.add_argument(
         "--sqlite-rows",
@@ -132,6 +136,53 @@ def _build_parser() -> argparse.ArgumentParser:
         "asked to run the (SQLite-flavored) reference SQL, which usually "
         "fails for anything beyond mild divergence. Useful only when "
         "you've authored dialect-specific reference SQL.",
+    )
+
+    # BIRD-specific options (used when --backend=bird).
+    p.add_argument(
+        "--bird-split",
+        choices=["train", "dev"],
+        default="dev",
+        help="BIRD-SQL split to draw questions from (default: dev = "
+        "1.5k community-reviewed questions; train = ~6.6k filtered).",
+    )
+    p.add_argument(
+        "--bird-limit",
+        type=int,
+        default=50,
+        help="How many BIRD questions to sample for this run "
+        "(default: 50). Sampling is reproducible given --bird-seed.",
+    )
+    p.add_argument(
+        "--bird-difficulties",
+        default="simple,moderate",
+        help="Comma-separated subset of {simple, moderate, challenging} "
+        "to keep before sampling (default: simple,moderate).",
+    )
+    p.add_argument(
+        "--bird-seed",
+        type=int,
+        default=0,
+        help="PRNG seed for the BIRD subset (default: 0).",
+    )
+    p.add_argument(
+        "--bird-db-dir",
+        default=None,
+        help="Override the directory holding <db_id>/<db_id>.sqlite. "
+        "Defaults to $BIRD_DB_DIR or ~/.cache/manysql/bird/<split>/.",
+    )
+    p.add_argument(
+        "--bird-sample-rows",
+        type=int,
+        default=3,
+        help="Sample rows to include per table in the per-question "
+        "prompt (default: 3; 0 disables).",
+    )
+    p.add_argument(
+        "--bird-no-auto-download",
+        action="store_true",
+        help="Disable auto-download of the BIRD train zip (~5GB). "
+        "Useful in air-gapped envs; pair with --bird-db-dir.",
     )
 
     # Run config
@@ -206,6 +257,52 @@ def _default_output_path(provider: str, model: str, backend: str) -> Path:
     return Path("results") / f"{provider}_{safe_model}_{backend}.json"
 
 
+def _build_bird_questions(
+    args: argparse.Namespace, *, names: list[str] | None
+) -> list[Any]:
+    """Build the BIRD subset honoring `--bird-*` flags + `--questions/--limit`.
+
+    Order of operations mirrors the github-events path:
+      1. Sample N=`--bird-limit` questions from the chosen split,
+         filtered by `--bird-difficulties` and seeded by `--bird-seed`.
+      2. Optionally restrict to the names in `--questions`.
+      3. Apply the global `--limit` cap (unusual for BIRD since
+         `--bird-limit` already sizes the sample, but kept consistent
+         with the other backends).
+    """
+    from eval.dataset.bird import select_bird  # noqa: PLC0415
+
+    diffs = tuple(
+        d.strip().lower()
+        for d in args.bird_difficulties.split(",")
+        if d.strip()
+    )
+    questions = select_bird(
+        n_samples=args.bird_limit,
+        split=args.bird_split,
+        seed=args.bird_seed,
+        difficulties=diffs,
+        db_dir=args.bird_db_dir,
+        sample_rows=args.bird_sample_rows,
+        auto_download=not args.bird_no_auto_download,
+    )
+    if names is not None:
+        by_name = {q.name: q for q in questions}
+        missing = [n for n in names if n not in by_name]
+        if missing:
+            raise SystemExit(
+                f"--questions referenced unknown BIRD question name(s): "
+                f"{missing[:5]}{'...' if len(missing) > 5 else ''}. "
+                "Names look like 'bird_<db_id>_<question_id>'; "
+                "drop the filter or list with `manysql-eval --backend "
+                "bird --dry-run` first."
+            )
+        questions = [by_name[n] for n in names]
+    if args.limit is not None and args.limit >= 0:
+        questions = questions[: args.limit]
+    return questions
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv()  # picks up .env from cwd; harmless if missing.
 
@@ -253,11 +350,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.questions
         else None
     )
-    questions = (
-        select(names, limit=args.limit)
-        if names is not None or args.limit is not None
-        else None
-    )
+    if args.backend == "bird":
+        questions = _build_bird_questions(args, names=names)
+    else:
+        questions = (
+            select(names, limit=args.limit)
+            if names is not None or args.limit is not None
+            else None
+        )
 
     output = (
         Path(args.output)
@@ -300,6 +400,8 @@ def _dry_run(args: argparse.Namespace) -> int:
             "n_rows": args.sqlite_rows,
             "seed": args.sqlite_seed,
         }
+    elif args.backend == "synthetic":
+        executor_kwargs = {"dialect": args.synthetic_dialect}
     executor = get_executor(args.backend, **executor_kwargs)
     executor.setup()
     try:
@@ -308,7 +410,10 @@ def _dry_run(args: argparse.Namespace) -> int:
             if args.questions
             else None
         )
-        questions = select(names, limit=args.limit)
+        if args.backend == "bird":
+            questions = _build_bird_questions(args, names=names)
+        else:
+            questions = select(names, limit=args.limit)
 
         table = Table(title=f"dry-run on backend={executor.name}")
         table.add_column("question")
@@ -332,7 +437,7 @@ def _dry_run(args: argparse.Namespace) -> int:
             if ref_sql is None:
                 table.add_row(q.name, "-", "[yellow]no reference SQL for dialect[/yellow]")
                 continue
-            res = executor.execute(ref_sql)
+            res = executor.execute(ref_sql, question=q)
             if res.success:
                 tag = (
                     "[green]ok[/green]"

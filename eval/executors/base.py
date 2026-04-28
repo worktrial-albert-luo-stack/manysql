@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from eval.dataset.questions import Question
 
 
 @dataclass
@@ -48,8 +51,16 @@ class SqlExecutor(ABC):
         """Prepare the backend (build/load datasets, open connections)."""
 
     @abstractmethod
-    def execute(self, sql: str) -> ExecResult:
-        """Run one query and return rows or an error."""
+    def execute(self, sql: str, *, question: Question | None = None) -> ExecResult:
+        """Run one query and return rows or an error.
+
+        ``question`` is the originating :class:`Question` (when available);
+        executors with a global schema (the default) ignore it. Executors
+        whose schema is per-question -- e.g. BIRD where each question
+        targets a different ``.sqlite`` file -- use it (typically
+        ``question.db_path``) to pick the right backing store. Passing
+        ``None`` is always legal and matches the default backend behavior.
+        """
 
     @abstractmethod
     def schema_prompt(self) -> str:

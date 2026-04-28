@@ -8,8 +8,8 @@ against a reference) but with three swappable axes:
 | Axis | Options |
 | --- | --- |
 | **LLM provider** | `openai`, `openrouter`, `vllm` (local OpenAI-compatible) |
-| **Execution backend** | `sqlite` (default), `tinybird`, `synthetic` (manysql-generated dialects) |
-| **Question suite** | full 50-question port of `tinybirdco/llm-benchmark` (extensible) |
+| **Execution backend** | `sqlite` (default), `tinybird`, `synthetic` (manysql-generated dialects), `bird` (BIRD-SQL subset) |
+| **Question suite** | full 50-question port of `tinybirdco/llm-benchmark`; BIRD-SQL train/dev subsets (extensible) |
 
 The default backend is **SQLite** seeded with a small synthetic GitHub-events
 corpus, so the bench runs end-to-end on a laptop with no external services.
@@ -107,10 +107,12 @@ eval/
 │   ├── base.py            # SqlExecutor protocol
 │   ├── sqlite_executor.py # default
 │   ├── tinybird_executor.py
-│   └── synthetic_executor.py  # parses + lowers via a manysql dialect
+│   ├── synthetic_executor.py     # parses + lowers via a manysql dialect
+│   └── bird_sqlite_executor.py   # per-question .sqlite switching for BIRD
 └── dataset/
     ├── github_events.py   # SQLite schema + deterministic seeder
-    └── questions.py       # NL question + reference SQL per dialect
+    ├── questions.py       # NL question + reference SQL per dialect
+    └── bird.py            # BIRD-SQL HF loader + per-question prompt renderer
 ```
 
 ## Adding a question
@@ -131,6 +133,64 @@ The OpenAI chat-completions wire format covers OpenAI, OpenRouter, vLLM,
 Together, Groq, llama.cpp's server, etc. — point `LLMClient(base_url=...)`
 at any compliant endpoint. For non-OpenAI-compatible APIs (Anthropic native,
 Bedrock, …), subclass `LLMClient.chat`.
+
+## BIRD-SQL subset
+
+`--backend bird` swaps the curated 50-question github-events suite for a
+sampled subset of [BIRD-SQL](https://bird-bench.github.io/) (real
+multi-table SQLite databases plus an `evidence` field of domain hints).
+Each question targets a different `.sqlite` file; the per-question
+schema (original column names + SQLite type declarations + a few
+sample rows + the BIRD evidence) is inlined into the user prompt, and
+the runner threads `Question.db_path` through to the executor so each
+candidate / gold SQL pair runs against the right DB.
+
+```bash
+# Dry run — sanity check that DBs are present + gold SQL runs.
+# Defaults: 50 questions from the dev split, difficulty=simple,moderate, seed=0.
+uv run manysql-eval --backend bird --dry-run
+
+# Live eval, 100 questions from train, 8 worker threads.
+uv run manysql-eval --backend bird --bird-split train --bird-limit 100 \
+    --provider openai --model gpt-4o-mini -j 8
+
+# Pin difficulty + seed for reproducibility; point at a custom DB cache.
+uv run manysql-eval --backend bird \
+    --bird-difficulties simple,moderate,challenging \
+    --bird-seed 42 --bird-limit 200 \
+    --bird-db-dir /scratch/bird/dev/ \
+    --provider openrouter --model anthropic/claude-sonnet-4
+
+# Re-run on a specific question subset (names look like `bird_<db_id>_<qid>`).
+uv run manysql-eval --backend bird \
+    --questions bird_california_schools_142,bird_california_schools_153 \
+    --provider openai --model gpt-4o-mini
+```
+
+Database files:
+
+* **Train** (~6.6k filtered questions, ~5GB of SQLite DBs) auto-downloads
+  from the public Beijing OSS bucket into `~/.cache/manysql/bird/train/`
+  on first use. Disable with `--bird-no-auto-download` for air-gapped
+  envs.
+* **Dev** (~1.5k community-reviewed questions) is gated behind a
+  Google-Drive page; download the dev DB pack manually and either set
+  `$BIRD_DB_DIR` or pass `--bird-db-dir`. The CLI prints the GDrive
+  link if the cache is empty.
+
+The candidate executor (`bird`) uses stdlib `sqlite3` opened in
+`mode=ro`, so the LLM's SQL is run read-only against the real BIRD
+schema. Gold rows come from running the BIRD `SQL` field through the
+same executor on the same per-question DB. Result-set comparison is
+column-name-insensitive (see `eval.validator`), so the LLM is not
+penalized for picking different aliases than the gold SQL.
+
+`--concurrency N` / `-j N` (described above) works with `--backend
+bird` too: each worker thread gets its own `sqlite3` connection per
+DB via a thread-local cache, so multi-threaded eval doesn't contend
+on a shared connection's statement-level lock. LLM calls are
+typically the bottleneck, so set `-j` to whatever your provider's
+rate limit (or local vLLM throughput) tolerates.
 
 ## Synthetic dialects
 

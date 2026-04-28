@@ -16,7 +16,7 @@ from __future__ import annotations
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from eval.dataset.github_events import (
     SCHEMA_DDL,
@@ -24,6 +24,9 @@ from eval.dataset.github_events import (
     seed_rows,
 )
 from eval.executors.base import ExecResult, SqlExecutor
+
+if TYPE_CHECKING:
+    from eval.dataset.questions import Question
 
 
 class SqliteExecutor(SqlExecutor):
@@ -63,7 +66,8 @@ class SqliteExecutor(SqlExecutor):
             cur.executemany(insert_sql, [tuple(r[c] for c in cols) for r in rows])
         self._conn.commit()
 
-    def execute(self, sql: str) -> ExecResult:
+    def execute(self, sql: str, *, question: Question | None = None) -> ExecResult:
+        del question  # global schema; per-question pointers are ignored.
         if self._conn is None:
             raise RuntimeError("SqliteExecutor.setup() not called")
 

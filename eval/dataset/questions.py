@@ -38,6 +38,14 @@ class Question:
     prompt: str
     reference_sql: dict[str, str]
     notes: str = ""
+    # Optional per-question database pointer. Set by question sources
+    # whose schema is per-question rather than global -- e.g. BIRD-SQL
+    # where each question targets a different ``.sqlite`` file. The
+    # runner threads this through to ``SqlExecutor.execute(sql,
+    # question=...)`` so executors that care (e.g. BirdSqliteExecutor)
+    # can swap their connection per question. Executors with a single
+    # global schema (sqlite/synthetic/tinybird) ignore it.
+    db_path: str | None = None
 
 
 # Each entry is `(name, prompt, sqlite_reference_sql)`. Keeping them as a

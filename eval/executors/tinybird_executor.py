@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import httpx
 
 from eval.executors.base import ExecResult, SqlExecutor
+
+if TYPE_CHECKING:
+    from eval.dataset.questions import Question
 
 _DEFAULT_SCHEMA_PROMPT = """\
 Table: github_events  (200M rows of public GitHub activity)
@@ -95,7 +98,8 @@ class TinybirdExecutor(SqlExecutor):
             headers={"Authorization": f"Bearer {self.workspace_token}"},
         )
 
-    def execute(self, sql: str) -> ExecResult:
+    def execute(self, sql: str, *, question: Question | None = None) -> ExecResult:
+        del question  # global schema; per-question pointers are ignored.
         if self._client is None:
             raise RuntimeError("TinybirdExecutor.setup() not called")
 

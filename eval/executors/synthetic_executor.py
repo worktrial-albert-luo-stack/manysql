@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     import polars as pl
     from lark import Lark
 
+    from eval.dataset.questions import Question
     from manysql.dialects.registry import DialectEngine
     from manysql.ir.plan import ColumnSchema
 
@@ -88,6 +89,13 @@ class SyntheticExecutor(SqlExecutor):
         self._catalog: dict[str, pl.DataFrame] = {}
         self._schemas: dict[str, tuple[ColumnSchema, ...]] = {}
         self._dialect_hints: str = ""
+        # Filled in by setup() from engine.spec["surface"]. Drives whether
+        # we strip-or-add a trailing terminator on every candidate SQL: some
+        # dialects require the terminator (their grammar makes it mandatory),
+        # most reject it. Treating both with a blanket rstrip(";") used to
+        # produce 100% parse failures on the requires_semicolon=True dialects.
+        self._requires_semicolon: bool = False
+        self._statement_terminator: str = ";"
 
     def setup(self) -> None:
         # Lazy imports keep `pip install eval` snappy and avoid pulling
@@ -125,14 +133,30 @@ class SyntheticExecutor(SqlExecutor):
         self._schemas = {"github_events": cols}
         self._dialect_hints = render_dialect_card(engine)
 
-    def execute(self, sql: str) -> ExecResult:
+        surface = (engine.spec or {}).get("surface", {})
+        self._requires_semicolon = bool(surface.get("requires_semicolon", False))
+        self._statement_terminator = surface.get("statement_terminator") or ";"
+
+    def execute(self, sql: str, *, question: Question | None = None) -> ExecResult:
+        del question  # global schema; per-question pointers are ignored.
         from manysql.executor import execute as plan_execute  # noqa: PLC0415
 
         if self._engine is None or self._parser is None:
             raise RuntimeError("SyntheticExecutor.setup() was not called")
 
-        sql = sql.strip().rstrip(";").strip()
-        if not sql:
+        # Normalize the trailing terminator against the dialect's grammar.
+        # We always strip whatever the model emitted (zero or more), then
+        # re-append exactly one if the dialect requires it. A bare rstrip(";")
+        # used to silently corrupt requires_semicolon=True dialects (e.g.
+        # snowacle_qualify, hive_teradata_nullsafe_wild) by removing the
+        # mandatory token before the parser saw it -> 100% UnexpectedEOF.
+        sql = sql.strip()
+        term = self._statement_terminator
+        while sql.endswith(term):
+            sql = sql[: -len(term)].rstrip()
+        if self._requires_semicolon:
+            sql = sql + term
+        if not sql or sql == term:
             return ExecResult(success=False, error="empty SQL", backend=self.name)
 
         start = time.perf_counter()

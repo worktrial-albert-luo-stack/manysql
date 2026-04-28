@@ -1,14 +1,68 @@
 # manysql
 
 A generator of synthetic **SQL dialects** with full per-dialect query
-engines, plus the verification and benchmarking infrastructure to use them
-as LLM training data.
+engines, plus the verification, evaluation, and RL infrastructure to
+use them as LLM training data.
 
-manysql is **scope-locked to SQL**. Generating non-SQL query languages
-(Cypher, jq, KQL, PRQL, streaming, procedural) is explicitly out of scope —
-see `manysql/ir/SCOPE.md`.
+manysql is **scope-locked to SQL** (Tier-A: relational algebra over
+batch, single-source, read-only data). Generating non-SQL query
+languages — Cypher, jq, KQL, PRQL, streaming, procedural — is
+explicitly out of scope; see [`manysql/ir/SCOPE.md`](manysql/ir/SCOPE.md).
 
-## What's in the box
+The full design walkthrough — SQL properties → architecture options →
+pipeline / engine internals → training & evaluation results → future
+experiments — lives in [`PRESENTATION.md`](PRESENTATION.md). This README
+is the short version: setup, design overview, headline results.
+
+## Setup
+
+```bash
+uv sync --extra dev
+cp .env.example .env  # add OPENAI_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_KEY as needed
+```
+
+## End-to-end smoke test
+
+```bash
+# 1. Generate a dialect package (deterministic, ~instant).
+uv run manysql-codegen gen mild_postgres_ish
+
+# 2. Inspect what changed vs. the reference surface.
+uv run manysql-dialect diff mild_postgres_ish
+
+# 3. Run a real eval. Reference SQL is computed via the auto-attached
+#    SQLite executor; the candidate dialect engine parses + executes
+#    the LLM's reply.
+uv run manysql-eval --backend synthetic \
+    --synthetic-dialect mild_postgres_ish \
+    --provider openai --model gpt-4o-mini \
+    --limit 10 -j 4
+
+# 4. Aggressive surface where the deterministic emitter alone won't
+#    suffice — force the LLM refine loop:
+uv run manysql-codegen gen aggressive_alien --use-llm --overwrite
+
+# 5. Populate a benchmark with many synthetic dialects in one shot.
+uv run manysql-codegen batch --n 5 \
+    --prior "variants between mssql and snowflake" \
+    --theme mixed \
+    --inspired-by sql_server,snowflake
+
+# 6. Run the test suite (oracles, harness, golden queries, codegen
+#    pipeline, registry, property fuzzing, cross-dialect differential).
+uv run pytest -n auto
+```
+
+CLI entry points (installed by `uv sync`):
+
+| Command | Purpose |
+| --- | --- |
+| `manysql-codegen gen <spec>` | Materialize a dialect package from a `DialectSpec`. `--use-llm` runs at least one LLM refinement pass on top of the deterministic baseline. |
+| `manysql-codegen batch --n N --prior <vibe>` | Outer-loop campaign: design N diverse specs, fan them through the codegen pipeline. Manifest at `manysql/dialects/_campaigns/<id>.json`. |
+| `manysql-dialect diff <name>` | Side-by-side diff of a generated dialect's reskinned battery vs. the canonical reference SQL. |
+| `manysql-eval` (alias `eval`) | Pluggable LLM SQL benchmark: NL question → model SQL → execute → retry on error → score. Backends: `sqlite`, `tinybird`, `synthetic`. Providers: `openai`, `openrouter`, `vllm`. See [`eval/README.md`](eval/README.md). |
+
+## Design overview
 
 ```
 DialectSpec  ─┐
@@ -29,168 +83,91 @@ DialectSpec  ─┐
               │   │  property oracle, cross-dialect differential)
               │   └─ Parquet-backed deterministic test catalog
               │
-              └─►  manysql-eval benchmark
-                   (NL question → LLM SQL → executor → score against reference,
-                   pluggable across SQLite / Tinybird / synthetic-dialect backends)
+              └─►  manysql-eval benchmark + train/ RL env (GRPO over
+                   synthetic dialects)
 ```
 
-Given a `DialectSpec` describing how a target dialect diverges from a
-near-ANSI reference (keyword aliases, surface knobs like `LIMIT` vs
-`OFFSET ... FETCH`, function aliases, semantic knobs like null ordering
-or division-by-zero), `manysql-codegen` emits a runnable engine for that
-dialect:
+A generated dialect is a directory of files under
+`manysql/dialects/<name>/`:
 
-- `grammar.lark` — Lark grammar for the dialect's surface syntax.
-- `lowering.py` — parse tree → shared logical-plan IR.
-- `semantics.json` — runtime knobs the executor honors.
-- `overrides.py` — optional Python implementations for novel functions/
-  operators no canonical executor handler can express.
-- `passes.py` — optional Plan→Plan rewrites between lowering and
-  execution (for surfaces that need non-canonical IR markers desugared).
-- `effects.py` — optional named handlers swapped into executor decision
-  points (for runtime divergences whose space isn't a small closed enum).
-- `metadata.json` — provenance, retry log, and lifecycle state.
-- `battery.json` + `examples.sql` — the parse/IR battery in dialect surface,
-  rendered as inspectable SQL.
+```
+grammar.lark       Lark grammar — surface syntax of this dialect
+lowering.py        parse tree → manysql IR Plan          (open-world)
+semantics.json     SemanticConfig values               (closed-world)
+overrides.py       FUNCTIONS / OPERATORS dicts          (open, optional)
+passes.py          PRE_EXECUTION_PASSES list            (open, optional)
+effects.py         EFFECTS dict                         (open, optional)
+metadata.json      provenance, retry log, lifecycle state
+spec.json          the DialectSpec this was generated from
+battery.json       parse + IR-equivalence batteries
+examples.sql       parse battery rendered as inspectable dialect SQL
+```
 
-The pipeline starts with deterministic emitters (templated from the spec)
-and falls back to an LLM refine loop when the spec's surface needs
-structural changes the templates can't express. LLM output is rolled back
-automatically if it regresses either battery.
+### Key design decisions
 
-## Architecture
+The architecture is forced by five facts about SQL (full argument in
+[`PRESENTATION.md` §1](PRESENTATION.md)):
 
-### IR (Tier-A, scope-locked)
+| SQL property | Force on the design |
+|---|---|
+| **Surface ≠ semantics** — the same query, byte-for-byte, can return different rows on different engines (NULL ordering, `1/0`, `LIKE` case sensitivity, `5/2`). | Token-level transpilation isn't enough. The system must *execute* candidate SQL under the dialect's actual runtime. |
+| **Layered (lex / syn / sem)** — three roughly-independent layers of variation. | Codegen parameterizes the layers independently — orthogonal knobs. |
+| **Closed-world divergence catalog (~15 axes)** — identifier folding, null order, divide-by-zero, integer division, `LIKE` case sensitivity, string-concat operator, set-op default, boolean truthiness, etc. | A small enum-driven config (`SemanticConfig`) covers most divergence as data, not code branches. |
+| **Long tail exists** — collations, novel functions, plan sugar (`QUALIFY`, `LIMIT … WITH TIES`). | Per-dialect Python escape hatches (`overrides.py`, `passes.py`, `effects.py`) alongside the enums. |
+| **Relational algebra is the common substrate** — every Tier-A SQL query lowers to ~14 operators. | One IR + one executor parameterized by `SemanticConfig` — not N forks. |
 
-`manysql/ir/` is relational algebra over batch, single-source, read-only
-data. v1 operators: `Scan`, `Project`, `Filter`, `Join` (incl. SEMI/ANTI),
-`Aggregate`, `Window`, `Sort`, `Limit`, `Distinct`, `SetOp`, `WithCTE`,
-`RecursiveCTE`, `Apply` (dependent join for correlated subqueries).
-Scalar / aggregate / window calls plus scalar/EXISTS/IN subqueries are
-expression nodes.
+The four extension lanes a dialect feature can land in, in priority
+order:
 
-All Tier-1 *runtime* divergence (null ordering, division-by-zero, integer
-division, identifier folding, set-op default, NULL-safe equality,
-COUNT-on-empty, boolean truthiness, default window frame, string-concat
-operator, function/keyword aliasing, LIKE case sensitivity, GROUP BY/SELECT
-scope rules) lives in `SemanticConfig` — **not** in IR shape. Two dialects
-with the same Plan but different `SemanticConfig` legitimately produce
-different rows.
+| Rule | Where the feature lives | Example |
+|---|---|---|
+| **1. Pure surface** | `SurfaceSpec` knob (closed enum) | `LIMIT n` ⇄ `OFFSET n ROWS FETCH NEXT n ROWS ONLY`; `\|\|` ⇄ `+` |
+| **2. Runtime divergence in a small enum** | `SemanticConfig` knob (closed enum) | NULL ordering on `ORDER BY`; divide-by-zero policy; `LIKE` case sensitivity |
+| **3. Canonical IR is the right *shape*, surface produces a non-canonical marker** | `passes.py` Plan→Plan rewrite | `LIMIT N WITH TIES` desugars to `Window(rank) → Filter(rank ≤ N) → Project` |
+| **4. Canonical IR is the right *shape*, executor's *implementation* differs** | `effects.py` handler at a registered name | `text_eq` / `text_neq` / `text_in_pattern` for case-insensitive collation |
+| **5. Canonical IR can't represent the feature** | Tier-B IR extension via RFC | arrays, JSON path expressions, sampling |
 
-Tier-B IR extensions (arrays/structs, JSON, regex flavor, sampling, time
-travel, MERGE, pivot/unpivot) are deferred to v1.5 behind RFCs under
-`manysql/ir/rfcs/`. Tier-C languages (Cypher, jq, streaming, procedural)
-are out of scope by design.
+Tier-B IR extensions (arrays/structs, JSON, regex flavor, sampling,
+time travel, MERGE, pivot/unpivot) are deferred to v1.5 behind RFCs
+under [`manysql/ir/rfcs/`](manysql/ir/rfcs/); each *grows* the IR
+rather than redesigning it, so Tier-A dialects keep working.
 
-See `manysql/ir/SCOPE.md` for the full prior.
+### Codegen pipeline
 
-### Executor
+```
+DialectSpec  ─►  deterministic emitters  ─►  parse battery   ─┐
+(Pydantic)         (templated from spec)                       │
+                          │                                    ▼
+                          ▼                       (passes? — done, ship)
+                     LLM refine loop                          │
+                  (only if templates                          ▼
+                   can't express, or                     IR battery
+                   --use-llm forced)                          │
+                          │                                   ▼
+                          ▼                          rejection battery
+                       rollback if                            │
+                       any battery                            ▼
+                       regresses                  card-conformance gate
+                                                              │
+                                                              ▼
+                                                    package on disk
+```
 
-`manysql/executor/` is a single Polars/PyArrow executor that takes
-`(Plan, SemanticConfig, catalog)` and returns a `pl.DataFrame`. Every
-behavior decision point reads from `SemanticConfig`, so swapping configs
-swaps semantics. Optional per-dialect overrides, passes, and effects
-extend it without forking the executor.
+Four validation gates: parse battery (every example parses), rejection
+battery (the grammar refuses reference-form syntax the spec disallows),
+IR equivalence (lowered plan matches the reference dialect's plan),
+card conformance (the dialect card matches what the grammar accepts).
+Any LLM iteration that regresses any battery is rolled back — the
+deterministic baseline is the floor.
 
 ### Verification harness
 
-`manysql/oracle/` runs a Plan through every applicable oracle and compares:
-
-- `DuckDBOracle` and `SQLiteOracle` — render the Plan back to SQL and
-  execute it on a real engine.
-- `ReferenceInterpreter` — slow, hand-coded Python interpreter over lists
-  of dicts. Independent code path from the Polars executor; agreement
-  between the two is the strongest local signal of correctness.
-- `PropertyOracle` — structural invariants (Distinct deduplicates, Sort
-  is sorted, Limit limits, Aggregate-without-GROUP-BY produces exactly
-  one row, SEMI/ANTI doesn't leak right-side columns, etc.). Always
-  applicable; cheap; complements row-producing oracles.
-- `CrossDialectOracle` — runs the *same logical query* through two or
-  more generated dialects and flags disagreement as either a curated
-  semantic-divergence training example or a codegen bug.
-
-The harness picks a primary by confidence, runs all applicable oracles,
-and returns one of `PASS / FAIL / NEEDS_REVIEW / NO_ORACLE`. Inter-oracle
-disagreement is `NEEDS_REVIEW` (informative — usually means the plan hits
-a corner case where engines themselves diverge).
-
-`tests/test_property_hypothesis.py` Hypothesis-fuzzes random catalogs
-against the property oracle for every golden plan.
-
-### Dialect registry
-
-`manysql/dialects/registry.py` is a backend-swappable store with a
-first-class lifecycle (`DRAFT → GENERATING → GENERATED → VALIDATED /
-NEEDS_REVIEW / FAILED → DEPRECATED`). v1 backend is on-disk Python
-packages under `manysql/dialects/<name>/`. Validation runs append to a
-per-dialect history.
-
-### Storage and golden queries
-
-`manysql/storage/` ships a deterministic Parquet catalog (employees /
-departments / regions / sales / categories tree) designed to exercise
-nullables, ties, leap days, correlated subqueries, recursive CTEs, and
-empty groups. `manysql/golden/queries.py` is the hand-curated SQL
-corpus the parse/IR batteries and harness exercise.
-
-## Tooling
-
-Three CLI entry points (all installed by `uv sync`):
-
-| Command | Purpose |
-| --- | --- |
-| `manysql-codegen gen <spec>` | Materialize a dialect package from a `DialectSpec` (or one of the bundled examples). `--use-llm` runs at least one LLM refinement pass on top of the deterministic baseline. |
-| `manysql-codegen batch --n N --prior <vibe>` | Outer-loop campaign: design N diverse specs (sequentially, with a running ledger for diversity) from a free-form prior + structured knobs, then fan them through the codegen pipeline in parallel. Manifest at `manysql/dialects/_campaigns/<id>.json`. Requires an LLM key. |
-| `manysql-dialect diff <name>` | Side-by-side diff of a generated dialect's reskinned battery vs. the canonical reference SQL. Useful for "did this surface knob actually take effect?" |
-| `manysql-eval` (alias `eval`) | Pluggable LLM SQL benchmark: NL question → model SQL → execute → retry on error → score. Backends: `sqlite` (default, with a synthetic GitHub-events seed), `tinybird`, `synthetic` (a manysql-generated dialect with a SQLite reference auto-attached for ground truth). LLM providers: `openai`, `openrouter`, `vllm`. See `eval/README.md` for the full surface. |
-
-### Bundled dialect specs
-
-These are the curated `DialectSpec`s that ship in the package, exposed
-via `manysql-codegen gen <name>`:
-
-```bash
-manysql-codegen --list
-```
-
-| Name | Divergence | Notes |
-| --- | --- | --- |
-| `mild_postgres_ish` | mild | Surface stays ANSI; flips a handful of semantic knobs (lowercase fold, NULLS FIRST default DESC, integer division truncates, division-by-zero errors). Smoke test for the codegen pipeline. |
-| `moderate_keyword_swap` | moderate | Renamed clause keywords + alternate `LIMIT` syntax. |
-| `aggressive_alien` | aggressive | NIL nulls, `::` casts, `~=` for null-safe equality, `+` for string concat, `OFFSET … FETCH` limits, no ILIKE, `HAVE` instead of `HAVING`, `ORDERED BY` instead of `ORDER BY`. Stresses the LLM refine loop. |
-| `snowflake_clone` | mild | Faithful Snowflake target: UPPER identifier fold, ILIKE, NULLS FIRST/LAST defaults, division-by-zero errors, integer division promotes to float, `//` line comments, `TRY_CAST`/`NVL`/`IFNULL` aliases. |
-| `sqlite_clone` | mild | Faithful SQLite target: preserve-case (ASCII-insensitive) identifiers, NULL-on-divide-by-zero, truncating integer division, case-insensitive `LIKE`, no `ILIKE`, C-style boolean truthiness, `IFNULL`/`SUBSTRING` aliases. Pairs with `snowflake_clone` to bracket realistic real-world divergence. |
-| `postgres_clone` | mild | Faithful Postgres target: lowercase identifier fold, NULLS LAST on ASC / FIRST on DESC, division-by-zero errors, truncating integer division, case-sensitive `LIKE`, native `ILIKE`, strict booleans, `CHAR_LENGTH`/`SUBSTRING` aliases. Used as the engine-perf baseline by [`eval/perf_bench.py`](eval/perf_bench.py); see [`eval/PERFORMANCE.md`](eval/PERFORMANCE.md) for measured results. |
-
-### Synth-generated dialects (sample)
-
-The batch campaign generator (`manysql-codegen batch`) emits LLM-designed
-dialects on top of the bundled specs above. The dialects below come from
-the most recent campaign, run after the LLM-lane harness was widened with
-axis-targeted parse + IR batteries, a rejection battery (must-fail
-reference-form syntax per non-default knob), and a card-conformance gate
-that refuses to ship a package when the dialect card advertises syntax
-the grammar doesn't actually accept. They headline lexical / operator
-axes the previous batches missed silently.
-
-| Name | Inspired by | Headline divergences |
-| --- | --- | --- |
-| `oracle_maria_modconcat` | oracle, mariadb, db2 | `MOD` as infix keyword for modulo, `+` for string concat, `<=>` null-safe equality, `^=` not-equal, `EXCEPT`/`INTERSECT` bind tighter than `UNION`. |
-| `firebird_click_wildcard` | firebird, clickhouse, sql_server | `*` / `?` LIKE wildcard chars (replacing `%` / `_`), `CONCAT(...)`-only string joining, bracket identifier quoting, rich function aliases (`LEN`/`IFNULL`/`MID`). |
-| `redshift_informix_cmpops` | redshift, informix, db2 | `==` for equality with triple `^=` / `<>` / `!=` neq spellings, `MOD` infix, `convert_fn` cast syntax, `//` line comments, `CHAR_LENGTH`-primary function aliasing. |
-| `hive_teradata_nullsafe_wild` | hive, teradata, mysql | `<=>` null-safe equality (MySQL/Hive), `?` LIKE wildcard for single-char match, `\|\|` concat with typed coercion, `MOD` infix, backtick identifiers, `EXCEPT`/`INTERSECT` tighter precedence. |
-| `snowdb2_dotmod_nullsafe` | snowflake, db2, sql_server | `.` LIKE wildcard char (replaces `_`), `MOD(a, b)` function-style modulo, `ISNULL(a,b) = ISNULL(c,d)` null-safe-eq pattern, bracket identifiers, `OFFSET`/`FETCH` limits. |
-| `sqlite_pg_concatmod_hybrid` | sqlite, postgres, snowflake | `\|\|` concat with typed coercion (SQLite-style implicit text cast), dual `MOD()` / `%` modulo, broad alias dispatch (`NVL`/`IFNULL`/`COALESCE` and `LEN`/`LENGTH`/`CHAR_LENGTH`), `EXCEPT`/`INTERSECT` tighter precedence. |
-| `bigquery_sqlite_notprefix` | bigquery, sqlite, sql_server | T-SQL legacy `!<` for `>=` and `!>` for `<=`, `@` LIKE wildcard, backtick identifiers, `CONCAT(...)`-only string joining, broad function aliasing. |
-| `clickhouse_oracle_samplelimit` | clickhouse, oracle, snowflake | `SAMPLE N` row-limiting syntax, native null-safe-eq disabled (forces `ISNULL`-style workaround), `#` hash-line comments, `MOD()` function aliasing, preserve-case identifiers, required statement terminator. |
-| `db2_oracle_fetchfirst` | db2, oracle, sql_2008 | `FETCH FIRST N ROWS ONLY` row-limiting (DB2/SQL:2008), `MINUS` keyword for `EXCEPT`, `UNIQUE` keyword for `DISTINCT`, sole `<>` not-equal (no `!=`), upper-case identifier fold with case-sensitive double-quoted identifiers. |
-| `informix_firebird_firstn` | informix, firebird, oracle, db2 | `FIRST N` (head-style) row-limiting, double-quoted string literals, upper-case-folded double-quoted identifiers, `MINUS` for `EXCEPT`, `UNIQUE` for `DISTINCT`, sole `<>` not-equal. |
-
-Campaigns themselves get manifests under
-`manysql/dialects/_campaigns/<id>.json` (per-campaign config, brief, every
-drafted spec, and per-package status); the registry skips that directory
-because it contains no dialect packages. Run
-`manysql-codegen batch --n 5 --prior "..."` to generate your own.
+`manysql/oracle/` runs a Plan through every applicable oracle (DuckDB,
+SQLite, a hand-written reference interpreter independent of the Polars
+executor, structural property invariants, and a cross-dialect
+differential check) and returns `PASS / FAIL / NEEDS_REVIEW /
+NO_ORACLE`. Cross-dialect disagreement is either curated
+semantic-divergence training data or a codegen bug.
 
 ## Repository layout
 
@@ -202,173 +179,157 @@ manysql/
 │                    #   cross-dialect oracles + harness
 ├── storage/         # Parquet-backed deterministic test catalog
 ├── spec/            # SemanticConfig + DialectSpec schemas (Pydantic)
-│   └── examples/    # bundled DialectSpec instances
-├── dialects/
-│   ├── _reference/  # hand-written near-ANSI / DuckDB-aligned reference
-│   ├── _campaigns/  # batch-codegen manifests (config + drafted specs +
-│   │                #   per-package status; one JSON per `batch` run)
-│   ├── <name>/      # generated dialect packages (one folder each)
-│   ├── registry.py  # lifecycle-aware, backend-swappable registry
-│   ├── card.py      # shared dialect-card prompt (used by eval + train)
-│   └── diff.py      # battery diff helpers
-├── codegen/         # deterministic emitters + grammar/lowering LLM agents
-│                    #   + parse battery + IR-equivalence battery
+├── dialects/        # generated dialect packages, registry, _campaigns/
+├── codegen/         # deterministic emitters + LLM refine agents
+│                    #   + parse / IR / rejection batteries
 ├── golden/          # hand-curated SQL corpus (queries.py)
 ├── llm/             # thin OpenAI/OpenRouter/Anthropic chat client
 └── verify/          # harness loops over goldens
 
-eval/                # pluggable LLM SQL benchmark (see eval/README.md)
+eval/                # pluggable LLM SQL benchmark + perf bench
+                     #   (see eval/README.md, eval/PERFORMANCE.md)
+train/               # GRPO/RLVR training entrypoints + SQL RL env
+                     #   (multi-turn dialect runtime, reward shaping,
+                     #   TRL adapter, golden / eval_suite / wikisql /
+                     #   bird / synsql data sources). See
+                     #   train/env/README.md and train/winning_runs.txt.
 tests/               # pytest suite (oracles, harness, golden queries,
                      #   codegen pipeline, registry, property fuzzing,
                      #   cross-dialect differential, ...)
-train/               # GRPO/RLVR training entrypoints + SQL RL env
-                     #   (multi-turn dialect runtime, reward shaping,
-                     #   TRL adapter, WikiSQL / BIRD-SQL / SynSQL-2.5M
-                     #   data sources). See train/env/README.md for the
-                     #   full surface.
 ```
 
-## RL training over synthetic dialects
+## Headline results
 
-`train/env/` is a multi-turn RL environment over manysql synthetic
-dialects: agent reads a system prompt + a question, calls a `run_sql`
-tool, and either matches the gold rows (success) or gets a parse /
-runtime error trace it can iterate on next turn. Reward is a function
-of correctness *and* the number of turns it took to get there. See
-`train/env/README.md` for the architecture and adapter API.
+### Engine size
 
-`train/grpo_sql.py` is the GRPO fine-tuning entry point (Unsloth + TRL
-+ vLLM). Five task generators ship:
+The full shared executor — every dialect on disk, every benchmark
+question, every RL rollout flows through this code — is **1,500 lines**.
+Adding the closed Tier-A IR it dispatches over puts the entire shared
+runtime at **2,468 lines**:
 
-| Generator | Source | Best for |
-|---|---|---|
-| `golden` (default) | Cross-dialect translation tasks built from `manysql.golden.queries` on the canonical 5-table catalog. | Teaching the model to *speak* a synthetic dialect (mechanical translation, no NL ambiguity). |
-| `eval_suite` | NL questions from `eval.dataset.questions` over the synthetic `github_events` corpus. | End-to-end NL→SQL on the same benchmark as `manysql-eval`. |
-| `wikisql` | NL/table/answer triples sampled from `Salesforce/wikisql`. Each task carries its own small Wikipedia table; column names are sanitized to safe `c_*` identifiers. | NL→SQL on real, diverse schemas (1k–80k tasks). |
-| `bird` | NL/multi-table-database/answer triples from BIRD-SQL (`birdsql/bird23-train-filtered` for train, `bird_sql_dev_20251106` for dev). Each task references one real Kaggle-style database (5–25 tables) plus a domain-`evidence` field. Strictly harder than WikiSQL (joins, subqueries, CTEs, windows, evidence-driven reasoning). | NL→SQL once the model ceilings out on WikiSQL — the simple+moderate slice keeps yielding signal for 4B+ instruct models. |
-| `synsql` | NL/multi-table-database/answer triples from `seeklhy/SynSQL-2.5M` (2.54M questions across 16k+ synthetic SQLite DBs, with `simple`/`moderate`/`complex`/`highly complex` complexity bands and a wide spread of NL question styles). Streams just the requested subset of the 9.36 GB `data.json` over HTTPS instead of downloading the full file. | NL→SQL at million-question scale — strictly larger and more diverse than BIRD; useful when GRPO ceilings out on BIRD's simple+moderate slice. |
+| File | Lines |
+|---|---:|
+| [`manysql/executor/engine.py`](manysql/executor/engine.py) | 810 |
+| [`manysql/executor/expr_eval.py`](manysql/executor/expr_eval.py) | 679 |
+| [`manysql/executor/__init__.py`](manysql/executor/__init__.py) | 11 |
+| [`manysql/ir/`](manysql/ir/) (plan, expr, types, printer) | 968 |
+| **Total — shared runtime** | **2,468** |
 
-Multi-dialect curricula are first-class: pass
-`--dialects aggressive_alien,mild_postgres_ish,tsql_ish` and the same
-training run trains one model on all three at once. Each row's system
-prompt tags it with `Dialect: <name>` so the model learns to route;
-the reward function dispatches per row using the dataset's `dialect`
-column and re-executes against ground truth. Two coverage modes:
+Adding a *dialect* adds a `grammar.lark` and a `lowering.py`; the
+executor doesn't change. That's the single-engine architecture
+collapsing what would otherwise be N forks.
 
-| Mode | Effect |
-|---|---|
-| `partition` (default) | Round-robin assign each task to one dialect (N rows total). |
-| `cross_product` | Emit each task once per dialect (N × M rows; `task_id` suffixed `__<dialect>`). |
+### Engine performance — parity with real Postgres at 200k rows
 
-Each dialect's system prompt includes its **dialect card**
-(`manysql.dialects.card.render_dialect_card`): surface divergences,
-canonical patterns, function aliases, and a few worked examples — same
-priors `manysql-eval` uses, by design.
+[`eval/perf_bench.py`](eval/perf_bench.py) runs a 15-query, dialect-
+neutral SQL suite against (a) embedded Postgres 16 via `psycopg` and
+(b) manysql `postgres_clone` (Lark parse → IR lowering → Polars
+execution) on identical data with identical warmup/repeat schedules.
 
-```bash
-# CPU dry-run (no GPU, no Unsloth/vLLM): exercises dataset + tool +
-# every reward-component end-to-end on a handful of synthetic
-# completions. Prints the reward breakdown + multi-dialect dispatch.
-uv run python -m train.grpo_sql \
-    --dialects aggressive_alien,tsql_ish \
-    --generator wikisql --wikisql-size 32 \
-    --dry-run
+| dataset | repeats | geomean (manysql / pg) | row-equivalence |
+|---|---|---|---|
+| 50k rows | 1 warmup + 5 timed | 3.76× (Postgres faster) | 15 / 15 |
+| **200k rows** | **2 warmup + 10 timed** | **1.03× (parity)** | **15 / 15** |
 
-# GPU box: real training. See train/grpo_sql.py module docstring for
-# the full uv install incantation (unsloth + trl + vllm + transformers).
-python train/grpo_sql.py \
-    --dialects aggressive_alien,mild_postgres_ish,tsql_ish \
-    --generator wikisql --wikisql-size 2000 \
-    --max-steps 500
+The crossover: manysql carries a fixed ~4–8 ms per-query overhead
+(parse + lower + Polars plan build) that dominates on small data;
+Polars's vectorized execution scales better than Postgres's row-based
+engine, so by 200k rows the two are essentially tied — with each
+winning on different query shapes (manysql ~7–9× on high-cardinality
+`COUNT(DISTINCT)` and `GROUP BY`; Postgres ~3–4× on planner-friendly
+semi-joins and constant-substring aggregations).
 
-# BIRD: harder than WikiSQL. Auto-downloads a ~5GB SQLite pack on
-# first run (cached at ~/.cache/manysql/bird/train/, with selective
-# extraction so only the DBs referenced by your sample land on disk).
-# Filter to simple+moderate difficulty by default; 'challenging' is
-# opt-in via --bird-difficulty. Memory- and disk-safety knobs:
-#   --bird-max-db-bytes BYTES   skip oversized DBs (default 500MB,
-#                               excludes the donor=4.5GB long tail)
-#   --bird-max-rows-per-table N cap each table to N rows via a
-#                               sampled SQLite mirror (default 200k)
-python train/grpo_sql.py \
-    --dialects aggressive_alien,mild_postgres_ish,tsql_ish \
-    --generator bird --bird-size 1000 \
-    --max-steps 500
+Full per-query breakdown: [`eval/PERFORMANCE.md`](eval/PERFORMANCE.md).
 
-# SynSQL-2.5M: million-question synthetic corpus. The 9.36GB data.json
-# is streamed (custom incremental JSON parser) so a 1k-sample run
-# transfers ~5-10MB instead of the full file; databases.zip (55MB) is
-# downloaded once and selectively extracted. Cached subsets live under
-# ~/.cache/manysql/synsql/. Same complexity / row-cap knobs as BIRD:
-#   --synsql-complexity simple,moderate    (default; or 'complex' / 'highly complex')
-#   --synsql-split train|dev|test          (carved by absolute item index)
-#   --synsql-max-rows-per-table N          (default 200k; rarely triggers — DBs are tiny)
-python train/grpo_sql.py \
-    --dialects aggressive_alien,mild_postgres_ish,tsql_ish \
-    --generator synsql --synsql-size 2000 \
-    --max-steps 500
-```
+This number is the floor we needed: codegen-validation batteries
+finish in seconds (gate every codegen attempt), RL rollouts can do
+thousands of executions per minute (re-execute every model SQL through
+the dialect runtime instead of relying on string-match), and
+`manysql-eval --backend synthetic` is a viable closed-source-engine
+stand-in.
 
-## Setup
+### Training run results — synsql DDP-3, Qwen3-4B-Instruct GRPO
 
-```bash
-uv sync --extra dev
-cp .env.example .env  # add OPENAI_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_KEY as needed
-```
+Two 500-step GRPO runs (recipe + commands in
+[`train/winning_runs.txt`](train/winning_runs.txt)) share everything
+except the dialect mix, on identical hyperparams (cosine LR 5e-6,
+`num_generations=6`, `per_device_train_batch_size=2`, temperature 1.6,
+`max_seq_length=6144`, LoRA rank 32, 3-rank DDP on 3× H100, vLLM
+colocated):
 
-## End-to-end smoke test
+- **1-d run**: synsql 1k slice (simple+moderate), one dialect =
+  `snowflake_clone`. 51:47 wall-clock.
+- **10-d run**: same slice, mix = `snowflake_clone` plus 9 generated
+  gen-1 dialects (`sqlite_clone, bigmaria_pivot,
+  bqserver_qualify_filter, mariflake_comma_semi, mydb2_rollup,
+  mysqlite_upsert, orashift_merge, pgserver_schema_ns, redgres_lateral`).
+  49:50 wall-clock.
 
-```bash
-# 1. Generate a dialect package (deterministic, ~instant).
-uv run manysql-codegen gen mild_postgres_ish
+Both adapters were evaluated against `eval/serve_lora.py` on the
+50-question github_events benchmark with `--prompt-mode tag`, on
+`snowflake_clone` (in-distribution for both runs) and `snowacle_qualify`
+(a held-out gen-1 dialect neither LoRA saw):
 
-# 2. Inspect what changed vs. the reference surface.
-uv run manysql-dialect diff mild_postgres_ish
+| Model | Dialect | matched/50 |
+|---|---|---:|
+| Qwen3-4B base | `snowflake_clone` (in-dist) | 26 (52%) |
+| 1-d LoRA | `snowflake_clone` (in-dist) | 23 (46%) |
+| **10-d LoRA** | `snowflake_clone` (in-dist) | **25 (50%)** |
+| Qwen3-4B base | `snowacle_qualify` (gen-1 OOD) | 12 (24%) |
+| 1-d LoRA | `snowacle_qualify` (gen-1 OOD) | **18 (36%)** |
+| 10-d LoRA | `snowacle_qualify` (gen-1 OOD) | **18 (36%)** |
 
-# 3. Sanity-check the eval backend can load it.
-uv run manysql-eval --backend synthetic \
-    --synthetic-dialect mild_postgres_ish \
-    --limit 5 --dry-run
+Three takeaways:
 
-# 4. Run a real eval. Reference SQL is computed via the auto-attached
-#    SQLite executor; the candidate dialect engine parses + executes
-#    the LLM's reply.
-uv run manysql-eval --backend synthetic \
-    --synthetic-dialect mild_postgres_ish \
-    --provider openai --model gpt-4o-mini \
-    --limit 10 -j 4
-```
+1. **Multi-dialect training is approximately free on the trained
+   distribution.** The 10-d LoRA scores 25/50 on `snowflake_clone` vs
+   the 1-d LoRA's 23/50 — slightly better, despite spending 90% of its
+   training compute on the other 9 dialects. The "specialist" run did
+   not specialise harder, and the "generalist" did not regress on the
+   specialty.
+2. **Breadth of training does not multiply OOD transfer.** Both LoRAs
+   hit the same 18/50 = 36% on the held-out `snowacle_qualify`,
+   +12 pp over base. Whatever transfers is "knowing how to write
+   parseable SQL with retries on `github_events` in some manysql
+   dialect" — not "knowing the snowflake-family dialect family in
+   general."
+3. **Both LoRAs regress slightly vs base on the in-distribution
+   benchmark** (52% → 46–50%). The typical GRPO narrowing artefact:
+   first-attempt rate climbs (to 58–66%), but the long tail of
+   "questions the base happened to solve once" shrinks.
 
-For an aggressive surface where the deterministic emitter alone won't
-suffice, force the LLM refine loop:
+Strategy implication: **train one 10-d LoRA per generation batch, not
+10 single-dialect LoRAs.** Same training cost, comparable per-dialect
+accuracy, single artefact to ship.
 
-```bash
-uv run manysql-codegen gen aggressive_alien --use-llm --overwrite
-```
+Bug-found-during-evaluation writeup, base-model floor diagnostics, and
+the empty-set artifact pitfall: [`eval/FINDINGS.md`](eval/FINDINGS.md).
 
-To populate a benchmark with many synthetic dialects in one shot:
+## Bundled dialect specs
 
-```bash
-uv run manysql-codegen batch --n 5 \
-    --prior "variants between mssql and snowflake" \
-    --theme mixed \
-    --inspired-by sql_server,snowflake
-```
+Curated `DialectSpec`s ship in the package (`manysql-codegen --list`):
+6 hand-curated specs (`mild_postgres_ish`, `moderate_keyword_swap`,
+`aggressive_alien`, `snowflake_clone`, `sqlite_clone`,
+`postgres_clone` — the latter three are faithful real-engine clones,
+`postgres_clone` being the engine-perf baseline) plus 10+ campaign-
+generated hybrids exercising lexical / operator axes
+(`oracle_maria_modconcat`, `firebird_click_wildcard`,
+`redshift_informix_cmpops`, `hive_teradata_nullsafe_wild`,
+`snowdb2_dotmod_nullsafe`, `sqlite_pg_concatmod_hybrid`,
+`bigquery_sqlite_notprefix`, `clickhouse_oracle_samplelimit`,
+`db2_oracle_fetchfirst`, `informix_firebird_firstn`, …). Campaign
+manifests at `manysql/dialects/_campaigns/<id>.json`.
 
-The pytest suite covers the IR, executor, every oracle, the harness, the
-registry lifecycle, the codegen pipeline (incl. agent stubs), property
-fuzzing, and cross-dialect differential checks:
+## RL training entry point
 
-```bash
-uv run pytest -n auto
-```
-
-## v1 scope
-
-ANSI-core read-only + window functions + CTEs (incl. recursive) + set ops
-+ subqueries (incl. correlated). Arrays / structs / JSON / regex flavor /
-sampling / time travel / MERGE / pivot are deferred to v1.5 via the
-IR-extension RFC process under `manysql/ir/rfcs/`.
-
-The first such RFC is `manysql/ir/rfcs/0001-tier3.md` (arrays/structs/maps,
-JSON path expressions, regex flavor selection, deep date/time).
+[`train/grpo_sql.py`](train/grpo_sql.py) is the GRPO fine-tuning entry
+point (Unsloth + TRL + vLLM); [`train/env/`](train/env/) is the
+multi-turn RL environment. Five task generators: `golden`
+(cross-dialect translation), `eval_suite` (NL on `github_events`),
+`wikisql`, `bird` (5 GB SQLite pack, selective extraction), `synsql`
+(2.5 M questions, streamed incrementally — a 1k sample transfers
+~5–10 MB instead of the full 9.36 GB). Multi-dialect curricula are
+first-class via `--dialects a,b,c`. See
+[`train/env/README.md`](train/env/README.md) for the env API and
+[`train/winning_runs.txt`](train/winning_runs.txt) for the verbatim
+reproduction commands of the headline experiment.

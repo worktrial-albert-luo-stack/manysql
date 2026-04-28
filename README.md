@@ -311,14 +311,23 @@ Curated `DialectSpec`s ship in the package (`manysql-codegen --list`):
 6 hand-curated specs (`mild_postgres_ish`, `moderate_keyword_swap`,
 `aggressive_alien`, `snowflake_clone`, `sqlite_clone`,
 `postgres_clone` — the latter three are faithful real-engine clones,
-`postgres_clone` being the engine-perf baseline) plus 10+ campaign-
-generated hybrids exercising lexical / operator axes
-(`oracle_maria_modconcat`, `firebird_click_wildcard`,
-`redshift_informix_cmpops`, `hive_teradata_nullsafe_wild`,
-`snowdb2_dotmod_nullsafe`, `sqlite_pg_concatmod_hybrid`,
-`bigquery_sqlite_notprefix`, `clickhouse_oracle_samplelimit`,
-`db2_oracle_fetchfirst`, `informix_firebird_firstn`, …). Campaign
-manifests at `manysql/dialects/_campaigns/<id>.json`.
+`postgres_clone` being the engine-perf baseline).
+
+The campaign generator (`manysql-codegen batch`) emits LLM-designed
+hybrid dialects on top of these. A representative sample (each
+`examples.sql` is the parse battery rendered as inspectable dialect
+SQL — fastest way to feel a dialect's surface):
+
+| Dialect | Inspired by | Headline divergences |
+|---|---|---|
+| [`firebird_click_wildcard`](manysql/dialects/firebird_click_wildcard/examples.sql) | firebird, clickhouse, sql_server | `*` / `?` LIKE wildcard chars (replacing `%` / `_`), `CONCAT(...)`-only string joining, bracket identifier quoting, `LEN`/`IFNULL`/`MID` aliases. |
+| [`oracle_maria_modconcat`](manysql/dialects/oracle_maria_modconcat/examples.sql) | oracle, mariadb, db2 | `MOD` as infix keyword for modulo, `+` for string concat, `<=>` null-safe equality, `^=` not-equal, `EXCEPT`/`INTERSECT` bind tighter than `UNION`. |
+| [`snowdb2_dotmod_nullsafe`](manysql/dialects/snowdb2_dotmod_nullsafe/examples.sql) | snowflake, db2, sql_server | `.` column wildcard (replaces `*`), `MOD(a, b)` function-style modulo, bracket identifiers, `OFFSET`/`FETCH` limits. |
+| [`hive_teradata_nullsafe_wild`](manysql/dialects/hive_teradata_nullsafe_wild/examples.sql) | hive, teradata, mysql | `<=>` null-safe equality, `?` LIKE wildcard for single-char match, `\|\|` concat with typed coercion, `MOD` infix, backtick identifiers. |
+| [`db2_oracle_fetchfirst`](manysql/dialects/db2_oracle_fetchfirst/examples.sql) | db2, oracle, sql_2008 | `FETCH FIRST N ROWS ONLY` row-limiting, `MINUS` keyword for `EXCEPT`, `UNIQUE` keyword for `DISTINCT`, sole `<>` not-equal, upper-case identifier fold. |
+
+Plus more under `manysql/dialects/`. Campaign manifests at
+`manysql/dialects/_campaigns/<id>.json`.
 
 ## RL training entry point
 
